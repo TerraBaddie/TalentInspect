@@ -1,0 +1,218 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.blizzard.com/wow/ui/ ..\FrameXML\UI.xsd">
+
+  <!-- FR2-XML1: reusable static talent-button presentation. Runtime talent data,
+       ownership, tooltip binding and rank state remain in TalentInspect.lua. -->
+  <Button name="TalentInspectTalentButtonTemplate" virtual="true" enableMouse="true">
+    <Size x="44" y="44"/>
+    <Layers>
+      <Layer level="ARTWORK">
+        <Texture name="$parentIcon">
+          <Anchors>
+            <Anchor point="TOPLEFT"><Offset x="1" y="-1"/></Anchor>
+            <Anchor point="BOTTOMRIGHT"><Offset x="-1" y="1"/></Anchor>
+          </Anchors>
+        </Texture>
+      </Layer>
+      <Layer level="OVERLAY">
+        <Texture name="$parentRankBG">
+          <Size x="24" y="17"/>
+          <Anchors><Anchor point="BOTTOMRIGHT"><Offset x="5" y="-3"/></Anchor></Anchors>
+          <Color r="0" g="0" b="0" a="0.88"/>
+        </Texture>
+        <FontString name="$parentRank" inherits="GameFontNormalSmall">
+          <Anchors><Anchor point="CENTER" relativeTo="$parentRankBG"/></Anchors>
+        </FontString>
+      </Layer>
+    </Layers>
+    <HighlightTexture name="$parentHighlight" file="Interface\Buttons\ButtonHilight-Square" alphaMode="BLEND"/>
+  </Button>
+
+  <!-- FR2-XML3: complete static top-spec-tab presentation. -->
+  <Button name="TalentInspectSpecTabTemplate" virtual="true" enableMouse="true">
+    <Size x="106" y="20"/>
+    <Layers>
+      <Layer level="BACKGROUND">
+        <Texture name="$parentBG">
+          <Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors>
+          <Color r="0.025" g="0.025" b="0.032" a="0.98"/>
+        </Texture>
+        <Texture name="$parentBlizzL" file="Interface\PaperDollInfoFrame\UI-Character-InActiveTab">
+          <Size x="38" y="32"/><Anchors><Anchor point="LEFT"/></Anchors>
+          <TexCoords left="0" right="0.15625" top="1" bottom="0"/>
+        </Texture>
+        <Texture name="$parentBlizzM" file="Interface\PaperDollInfoFrame\UI-Character-InActiveTab">
+          <Size x="64" y="32"/><Anchors><Anchor point="LEFT" relativeTo="$parentBlizzL" relativePoint="RIGHT"/></Anchors>
+          <TexCoords left="0.15625" right="0.84375" top="1" bottom="0"/>
+        </Texture>
+        <Texture name="$parentBlizzR" file="Interface\PaperDollInfoFrame\UI-Character-InActiveTab">
+          <Size x="20" y="32"/><Anchors><Anchor point="LEFT" relativeTo="$parentBlizzM" relativePoint="RIGHT"/></Anchors>
+          <TexCoords left="0.84375" right="1" top="1" bottom="0"/>
+        </Texture>
+      </Layer>
+      <Layer level="BORDER">
+        <Texture name="$parentEdge" file="Interface\Buttons\WHITE8X8">
+          <Size x="106" y="1"/><Anchors><Anchor point="TOPLEFT"/><Anchor point="TOPRIGHT"/></Anchors>
+        </Texture>
+      </Layer>
+      <Layer level="OVERLAY">
+        <FontString name="$parentText" inherits="GameFontNormalSmall">
+          <Anchors><Anchor point="CENTER"><Offset x="16" y="0"/></Anchor></Anchors>
+          <Color r="0.82" g="0.82" b="0.82"/>
+        </FontString>
+      </Layer>
+    </Layers>
+  </Button>
+
+  <!-- Main inspect-only talent page. Its host is assigned dynamically in Lua. -->
+  <Frame name="TalentInspectFrame" parent="UIParent" hidden="true" enableMouse="true" frameStrata="DIALOG">
+    <Size x="356" y="512"/>
+    <Anchors><Anchor point="CENTER" relativeTo="UIParent"><Offset x="120" y="20"/></Anchor></Anchors>
+    <Layers>
+      <Layer level="BACKGROUND">
+        <Texture name="TalentInspectFrameBG">
+          <Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors>
+          <Color r="0.035" g="0.035" b="0.045" a="0.98"/>
+        </Texture>
+      </Layer>
+      <Layer level="BORDER">
+        <Texture name="TalentInspectFrameBorder" file="Interface\Tooltips\UI-Tooltip-Border">
+          <Anchors>
+            <Anchor point="TOPLEFT"><Offset x="-4" y="4"/></Anchor>
+            <Anchor point="BOTTOMRIGHT"><Offset x="4" y="-4"/></Anchor>
+          </Anchors>
+        </Texture>
+      </Layer>
+      <Layer level="OVERLAY">
+        <FontString name="TalentInspectTitle" inherits="GameFontNormalLarge" text="TalentInspect">
+          <Anchors><Anchor point="TOP"><Offset x="0" y="-13"/></Anchor></Anchors>
+        </FontString>
+        <FontString name="TalentInspectSubtitle" inherits="GameFontHighlightSmall">
+          <Anchors><Anchor point="TOP" relativeTo="TalentInspectTitle" relativePoint="BOTTOM"><Offset x="0" y="-3"/></Anchor></Anchors>
+        </FontString>
+        <FontString name="TalentInspectTreeTitle" inherits="GameFontNormal">
+          <Anchors><Anchor point="TOP"><Offset x="0" y="-48"/></Anchor></Anchors>
+        </FontString>
+        <FontString name="TalentInspectStatus" inherits="GameFontDisableSmall" hidden="true">
+          <Anchors><Anchor point="BOTTOM"><Offset x="0" y="9"/></Anchor></Anchors>
+        </FontString>
+      </Layer>
+    </Layers>
+
+    <!-- Default Blizzard-only chrome. pfUI hides these in Lua. -->
+    <Frames>
+      <!-- FR2-XML5: high-level text overlay; artwork can never cover sync text. -->
+      <Frame name="TalentInspectStatusOverlay" enableMouse="false">
+        <Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors>
+        <Layers>
+          <Layer level="OVERLAY">
+            <FontString name="TalentInspectNoSyncLeft" inherits="GameFontHighlightSmall" text="Target not in party, raid, guild" hidden="true">
+              <Color r="1" g="1" b="1"/>
+            </FontString>
+            <FontString name="TalentInspectNoSyncRight" inherits="GameFontHighlightSmall" text="No TalentInspect Sync Data" hidden="true">
+              <Color r="1" g="1" b="1"/>
+            </FontString>
+          </Layer>
+        </Layers>
+      </Frame>
+
+      <Frame name="TalentInspectBlizzardChrome" enableMouse="false" hidden="true">
+        <Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors>
+        <Layers><Layer level="BACKGROUND">
+          <Texture name="TalentInspectBlizzTL" file="Interface\PaperDollInfoFrame\UI-Character-General-TopLeft">
+            <Size x="256" y="256"/><Anchors><Anchor point="TOPLEFT"><Offset x="-14" y="42"/></Anchor></Anchors>
+          </Texture>
+          <Texture name="TalentInspectBlizzTR" file="Interface\PaperDollInfoFrame\UI-Character-General-TopRight">
+            <Size x="128" y="256"/><Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectBlizzTL" relativePoint="TOPRIGHT"/></Anchors>
+          </Texture>
+          <Texture name="TalentInspectBlizzBL" file="Interface\TalentFrame\UI-TalentFrame-BotLeft">
+            <Size x="256" y="256"/><Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectBlizzTL" relativePoint="BOTTOMLEFT"/></Anchors>
+          </Texture>
+          <Texture name="TalentInspectBlizzBR" file="Interface\TalentFrame\UI-TalentFrame-BotRight">
+            <Size x="128" y="256"/><Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectBlizzTR" relativePoint="BOTTOMLEFT"/></Anchors>
+          </Texture>
+        </Layer></Layers>
+      </Frame>
+
+      <Frame name="TalentInspectBlizzardHeader" enableMouse="false" hidden="true">
+        <Size x="286" y="20"/><Anchors><Anchor point="TOP"><Offset x="0" y="-20"/></Anchor></Anchors>
+        <Layers><Layer level="ARTWORK">
+          <Texture name="TalentInspectHeaderL" file="Interface\Common\Common-Input-Border">
+            <Size x="8" y="20"/><Anchors><Anchor point="LEFT"/></Anchors><TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
+          </Texture>
+          <Texture name="TalentInspectHeaderM" file="Interface\Common\Common-Input-Border">
+            <Size x="270" y="20"/><Anchors><Anchor point="LEFT" relativeTo="TalentInspectHeaderL" relativePoint="RIGHT"/></Anchors><TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/>
+          </Texture>
+          <Texture name="TalentInspectHeaderR" file="Interface\Common\Common-Input-Border">
+            <Size x="8" y="20"/><Anchors><Anchor point="LEFT" relativeTo="TalentInspectHeaderM" relativePoint="RIGHT"/></Anchors><TexCoords left="0.9375" right="1" top="0" bottom="0.625"/>
+          </Texture>
+        </Layer></Layers>
+      </Frame>
+
+      <Button name="TalentInspectBlizzardClose" inherits="UIPanelButtonTemplate" text="Close" hidden="true">
+        <Size x="80" y="22"/><Anchors><Anchor point="BOTTOMRIGHT"><Offset x="-26" y="44"/></Anchor></Anchors>
+      </Button>
+      <Button name="TalentInspectStandaloneClose" inherits="UIPanelCloseButton">
+        <Anchors><Anchor point="TOPRIGHT"><Offset x="-3" y="-3"/></Anchor></Anchors>
+      </Button>
+
+      <!-- Fixed talent viewport and child canvas. -->
+      <ScrollFrame name="TalentInspectTreeScroll" enableMouse="true">
+        <Size x="320" y="350"/><Anchors><Anchor point="TOPLEFT"><Offset x="4" y="-48"/></Anchor></Anchors>
+        <ScrollChild>
+          <Frame name="TalentInspectTreeCanvas" enableMouse="false">
+            <Size x="320" y="397"/>
+          </Frame>
+        </ScrollChild>
+      </ScrollFrame>
+
+      <!-- Fixed native background clip, independent from talent scrolling. -->
+      <ScrollFrame name="TalentInspectTreeBackgroundClip" enableMouse="false">
+        <Size x="320" y="350"/>
+        <Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectTreeScroll" relativePoint="TOPLEFT"/></Anchors>
+        <ScrollChild>
+          <Frame name="TalentInspectTreeBackground" enableMouse="false">
+            <Size x="320" y="384"/>
+            <Layers><Layer level="BACKGROUND">
+              <Texture name="TalentInspectTreeTile1"><Size x="256" y="256"/><Anchors><Anchor point="TOPLEFT"/></Anchors></Texture>
+              <Texture name="TalentInspectTreeTile2"><Size x="64" y="256"/><Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectTreeTile1" relativePoint="TOPRIGHT"/></Anchors></Texture>
+              <Texture name="TalentInspectTreeTile3"><Size x="256" y="128"/><Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectTreeTile1" relativePoint="BOTTOMLEFT"/></Anchors></Texture>
+              <Texture name="TalentInspectTreeTile4"><Size x="64" y="128"/><Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectTreeTile2" relativePoint="BOTTOMLEFT"/></Anchors></Texture>
+            </Layer></Layers>
+          </Frame>
+        </ScrollChild>
+      </ScrollFrame>
+
+      <Frame name="TalentInspectBlankPane" enableMouse="false" hidden="true">
+        <Anchors>
+          <Anchor point="TOPLEFT" relativeTo="TalentInspectTreeScroll" relativePoint="TOPLEFT"/>
+          <Anchor point="BOTTOMRIGHT" relativeTo="TalentInspectTreeScroll" relativePoint="BOTTOMRIGHT"/>
+        </Anchors>
+        <Layers><Layer level="BACKGROUND"><Texture name="TalentInspectBlankPaneBG"><Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors><Color r="0.02" g="0.02" b="0.025" a="1"/></Texture></Layer></Layers>
+      </Frame>
+
+      <!-- Explicit SAFE1-style slider: scripts remain in Lua. -->
+      <Slider name="TalentInspectTreeScrollBar" orientation="VERTICAL" enableMouse="true">
+        <Size x="18" y="294"/>
+        <Anchors>
+          <Anchor point="TOPRIGHT" relativeTo="TalentInspectTreeScroll" relativePoint="TOPRIGHT"><Offset x="-2" y="-26"/></Anchor>
+          <Anchor point="BOTTOMRIGHT" relativeTo="TalentInspectTreeScroll" relativePoint="BOTTOMRIGHT"><Offset x="-2" y="30"/></Anchor>
+        </Anchors>
+        <ThumbTexture name="TalentInspectTreeScrollThumb" file="Interface\Buttons\UI-ScrollBar-Knob"><Size x="18" y="20"/></ThumbTexture>
+        <Layers><Layer level="BACKGROUND">
+          <Texture name="TalentInspectScrollTrack"><Size x="12" y="294"/><Anchors><Anchor point="TOP"/><Anchor point="BOTTOM"/></Anchors><Color r="0.08" g="0.08" b="0.09" a="0.95"/></Texture>
+          <Texture name="TalentInspectScrollTrackTop"><Size x="12" y="12"/><Anchors><Anchor point="BOTTOM" relativeTo="TalentInspectTreeScrollBar" relativePoint="TOP"/></Anchors><Color r="0.08" g="0.08" b="0.09" a="0.95"/></Texture>
+          <Texture name="TalentInspectScrollTrackBottom"><Size x="12" y="8"/><Anchors><Anchor point="TOP" relativeTo="TalentInspectTreeScrollBar" relativePoint="BOTTOM"><Offset x="0" y="3"/></Anchor></Anchors><Color r="0.08" g="0.08" b="0.09" a="0.95"/></Texture>
+        </Layer></Layers>
+      </Slider>
+      <Button name="TalentInspectTreeScrollUp" inherits="UIPanelScrollUpButtonTemplate"><Anchors><Anchor point="TOPRIGHT" relativeTo="TalentInspectTreeScroll" relativePoint="TOPRIGHT"><Offset x="-1" y="2"/></Anchor></Anchors></Button>
+      <Button name="TalentInspectTreeScrollDown" inherits="UIPanelScrollDownButtonTemplate"><Anchors><Anchor point="BOTTOMRIGHT" relativeTo="TalentInspectTreeScroll" relativePoint="BOTTOMRIGHT"><Offset x="-1" y="6"/></Anchor></Anchors></Button>
+
+      <!-- All six visual regions are inherited from the XML spec-tab template. -->
+      <Button name="TalentInspectTab1" inherits="TalentInspectSpecTabTemplate"/>
+      <Button name="TalentInspectTab2" inherits="TalentInspectSpecTabTemplate"/>
+      <Button name="TalentInspectTab3" inherits="TalentInspectSpecTabTemplate"/>
+    </Frames>
+  </Frame>
+</Ui>
