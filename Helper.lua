@@ -16,7 +16,7 @@
 TalentInspectHelper = TalentInspectHelper or {}
 local H = TalentInspectHelper
 
-H.VERSION = "1.0.0"
+H.VERSION = "1.0.3-GUARD2"
 H.scanScheduled = nil
 H.scanDelay = 0
 H.scanReason = nil
@@ -157,11 +157,12 @@ function H:RestoreLearned()
   end
 end
 
-function H:ScanCurrentClass(reason)
+function H:ScanCurrentClass(reason,includeDescriptions)
   local classToken=playerClass()
   if not classToken then return nil end
   if not GetNumTalentTabs or not GetNumTalents or not GetTalentInfo then return nil end
 
+  local oldLearned=TalentInspectData_Learned and TalentInspectData_Learned[classToken]
   local classData={class=classToken, scannedAt=time and time() or 0, trees={}}
   local total=0
   local numTabs=GetNumTalentTabs() or 0
@@ -199,12 +200,24 @@ function H:ScanCurrentClass(reason)
           preCol=preCol,
           preRank=preRank,
           prereqScanned=prereqScanned,
-          desc=tooltipDescription(tab,index),
-          -- GameTooltip:SetTalent shows current rank when learned, otherwise
-          -- the first learnable rank. Preserve that relationship explicitly.
+          desc=nil,
           descRank=((rank or 0)>0 and (rank or 0) or 1),
           scannedAt=classData.scannedAt
         }
+
+        if includeDescriptions then
+          rec.desc=tooltipDescription(tab,index)
+        else
+          -- SAFE132: automatic login scan is structural only. Preserve a prior
+          -- exact-name learned description instead of repeatedly calling the
+          -- legacy hidden GameTooltip:SetTalent path during startup.
+          local oldTree=oldLearned and oldLearned.trees and oldLearned.trees[tab]
+          local oldRec=oldTree and oldTree.byName and oldTree.byName[name]
+          if oldRec and oldRec.desc and oldRec.desc~="" then
+            rec.desc=oldRec.desc
+            rec.descRank=oldRec.descRank or rec.descRank
+          end
+        end
 
         tree.talents[index]=rec
         tree.byName[name]=rec
@@ -221,13 +234,15 @@ function H:ScanCurrentClass(reason)
   H.lastScanClass=classToken
   H.lastScanCount=total
   H.lastScanReason=reason or "manual"
+  H.lastScanDescriptions=includeDescriptions and 1 or 0
   return total
 end
 
-function H:ScheduleScan(delay,reason)
+function H:ScheduleScan(delay,reason,includeDescriptions)
   H.scanScheduled=1
   H.scanDelay=delay or 0.75
   H.scanReason=reason or "scheduled"
+  H.scanDescriptions=includeDescriptions and 1 or nil
 end
 
 -- Temporary driver only while a scan is scheduled.
@@ -243,14 +258,16 @@ driver:SetScript("OnUpdate",function()
   if H.scanDelay>0 then return end
 
   local reason=H.scanReason
+  local includeDescriptions=H.scanDescriptions
   H.scanScheduled=nil
   H.scanReason=nil
+  H.scanDescriptions=nil
   this:Hide()
-  H:ScanCurrentClass(reason)
+  H:ScanCurrentClass(reason,includeDescriptions)
 end)
 
-local function schedule(delay,reason)
-  H:ScheduleScan(delay,reason)
+local function schedule(delay,reason,includeDescriptions)
+  H:ScheduleScan(delay,reason,includeDescriptions)
   driver:Show()
 end
 
@@ -263,10 +280,11 @@ events:SetScript("OnEvent",function()
     -- FR4j: give VanillaPlus/custom-client talent APIs and tooltip text extra time
     -- to settle before the single bounded login scan. This avoids capturing
     -- stale early-login talent descriptions.
-    schedule(20.00,"login-delayed")
+    schedule(20.00,"login-delayed",nil)
   elseif event=="CHARACTER_POINTS_CHANGED" then
-    -- Coalesce rapid changes; one delayed full-class refresh.
-    schedule(0.75,"talent-change")
+    -- Coalesce rapid changes; player-initiated talent changes are a safe point
+    -- to refresh the live tooltip description for the current class.
+    schedule(0.75,"talent-change",1)
   end
 end)
 
@@ -274,11 +292,12 @@ SLASH_TALENTINSPECTLEARN1="/tilearn"
 SlashCmdList["TALENTINSPECTLEARN"]=function(msg)
   msg=string.lower(msg or "")
   if msg=="scan" or msg=="" then
-    local n=H:ScanCurrentClass("manual")
+    local n=H:ScanCurrentClass("manual",1)
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r live talent scan learned "..(n or 0).." current-class talents.")
   elseif msg=="status" then
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r learned class="..tostring(H.lastScanClass)..
-      " talents="..tostring(H.lastScanCount).." reason="..tostring(H.lastScanReason))
+      " talents="..tostring(H.lastScanCount).." reason="..tostring(H.lastScanReason)..
+      " descriptions="..tostring(H.lastScanDescriptions or 0))
   end
 end
 
