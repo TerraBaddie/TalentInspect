@@ -6,7 +6,7 @@ TalentInspectDB.cache = TalentInspectDB.cache or {}
 TalentInspectDB.cacheSchema = TalentInspectDB.cacheSchema or 1
 
 local TI = {}
-TI.VERSION = "1.0.0"
+TI.VERSION = "1.0.3-GUARD2"
 TI.PREFIX = "VPTI1"
 TI.selectedTab = 1
 TI.currentName = nil
@@ -275,19 +275,56 @@ local function isNameInParty(name)
   return nil
 end
 
+TI.guildPeers = TI.guildPeers or {}
+TI.guildRosterNames = TI.guildRosterNames or {}
+
+local function normalizePlayerName(name)
+  if not name then return nil end
+  -- Vanilla normally has no realm suffix, but tolerate one if a custom client adds it.
+  local dash=string.find(name,"-",1,true)
+  if dash then name=string.sub(name,1,dash-1) end
+  return string.lower(name)
+end
+
+local function refreshGuildRosterNames()
+  TI.guildRosterNames={}
+  if not GetNumGuildMembers or not GetGuildRosterInfo then return end
+  local n=GetNumGuildMembers(true) or GetNumGuildMembers() or 0
+  for i=1,n do
+    local name=GetGuildRosterInfo(i)
+    local key=normalizePlayerName(name)
+    if key then TI.guildRosterNames[key]=1 end
+  end
+end
+
 local function currentTargetSameGuild(name)
   if not name or not UnitExists("target") or UnitName("target")~=name then return nil end
   if not GetGuildInfo then return nil end
   local mine=GetGuildInfo("player")
   local theirs=GetGuildInfo("target")
-  if mine and theirs and mine~="" and mine==theirs then return 1 end
+  if mine and theirs and mine~="" and mine==theirs then
+    TI.guildPeers[normalizePlayerName(name) or name]=1
+    return 1
+  end
+  return nil
+end
+
+local function isKnownGuildPeer(name)
+  local key=normalizePlayerName(name)
+  if not key then return nil end
+  if TI.guildPeers[key] then return 1 end
+  if TI.guildRosterNames[key] then return 1 end
   return nil
 end
 
 local function transportFor(name)
   if isNameInRaid(name) then return "RAID" end
   if isNameInParty(name) then return "PARTY" end
-  if currentTargetSameGuild(name) then return "GUILD" end
+
+  -- SYNC1: GUILD transport must not depend on both clients targeting each
+  -- other at the exact same instant. Current-target confirmation, a remembered
+  -- guild peer, or the guild roster are all sufficient.
+  if currentTargetSameGuild(name) or isKnownGuildPeer(name) then return "GUILD" end
   return nil
 end
 
@@ -337,7 +374,7 @@ local function sendLearnedAdvertisement(target,channel)
   -- continuous polling: it runs only when another TalentInspect client
   -- actually requests/receives learned-data advertisement.
   if TalentInspectHelper.ScanCurrentClass then
-    TalentInspectHelper:ScanCurrentClass("peer-sync-authoritative-refresh")
+    TalentInspectHelper:ScanCurrentClass("peer-sync-authoritative-refresh",1)
   end
 
   local d=TalentInspectHelper:GetOwnLearnedClass()
@@ -1556,7 +1593,7 @@ local function showNoTransport(name)
   startFallbackTimer(
     name,
     classToken,
-    "Target not in party, raid, guild",
+    "WoW 1.12 sync requires party, raid, or guild",
     "No TalentInspect Sync Data"
   )
 end
@@ -1582,6 +1619,11 @@ local function request(name)
   end
 
   local channel=transportFor(name)
+  TI.syncDiag=TI.syncDiag or {}
+  TI.syncDiag.lastRequestName=name
+  TI.syncDiag.lastRequestChannel=channel or "NONE"
+  TI.syncDiag.lastRequestAt=GetTime and GetTime() or 0
+
   if not channel then
     if not cached then showNoTransport(name) end
     return
@@ -2070,10 +2112,50 @@ local function installNativeTab(prefix)
   return tab
 end
 
+local inspectFrameGuardInstalled=nil
+
+-- GUARD2: forward declarations are required in Lua 5.0 because the
+-- InspectFrame OnEvent closure is created before the helper implementations
+-- later in this file. Without these locals, the closure resolves globals and
+-- can throw "attempt to call global ... (a nil value)" when a target logs out.
+local targetCanBeInspectedSafely
+local closeInvalidInspectTarget
+
+local function installInspectFrameGuard()
+  if inspectFrameGuardInstalled then return end
+  local host=getglobal("InspectFrame")
+  if not host or not host.GetScript or not host.SetScript then return end
+  local oldOnEvent=host:GetScript("OnEvent")
+  if not oldOnEvent then return end
+
+  host:SetScript("OnEvent",function()
+    -- Stock Blizzard_InspectUI can attempt portrait work during a target swap
+    -- after the old inspected unit has become invalid. When TalentInspect owns
+    -- the InspectFrame, swallow only that invalid PLAYER_TARGET_CHANGED event.
+    if event=="PLAYER_TARGET_CHANGED" and TI.embeddedPrefix=="InspectFrame" and f:IsShown() then
+      local safe=nil
+      if targetCanBeInspectedSafely then safe=targetCanBeInspectedSafely() end
+      if not safe then
+        if closeInvalidInspectTarget then
+          closeInvalidInspectTarget()
+        else
+          -- Ultra-early fallback: never pass an invalid target transition into
+          -- stock Blizzard_InspectUI portrait code.
+          if host then host:Hide() end
+        end
+        return
+      end
+    end
+    oldOnEvent()
+  end)
+  inspectFrameGuardInstalled=1
+end
+
 local function installNativeTabs()
   -- FR1b: TalentInspect is inspect-only. Do not create/adopt a custom Talents
   -- tab on CharacterFrame; the server/default N talent window owns local talents.
   installNativeTab("InspectFrame")
+  installInspectFrameGuard()
 end
 
 local pendingNativeOpen=nil
@@ -2103,6 +2185,45 @@ local function openSelfTalents()
   DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r local talents use the normal Talents window (N). TalentInspect is for inspecting other players.")
 end
 
+targetCanBeInspectedSafely = function()
+  if not UnitExists("target") or not UnitIsPlayer("target") then return nil end
+  if UnitName("target")==UnitName("player") then return nil end
+
+  -- 1.12 InspectUnit itself is normally gated by CheckInteractDistance(...,1).
+  if CheckInteractDistance and not CheckInteractDistance("target",1) then
+    return nil
+  end
+  return 1
+end
+
+local function resetInspectTalentView(newName)
+  stopFallbackTimer()
+  hideNoSyncMessages()
+  f:Hide()
+  hideButtons()
+  showBlankPane()
+  for i=1,3 do if f.tabs[i] then f.tabs[i]:Hide() end end
+  TI.currentData=nil
+  TI.currentName=newName
+  TI.hoveredTalentButton=nil
+  TI.selectedTab=1
+  if GameTooltip then GameTooltip:Hide() end
+  local hs=TI.hostState and TI.hostState.InspectFrame
+  if hs then
+    hs.name=newName
+    hs.data=nil
+    hs.selectedTab=1
+  end
+end
+
+closeInvalidInspectTarget = function()
+  resetInspectTalentView(UnitExists("target") and UnitName("target") or nil)
+  local host=getglobal("InspectFrame")
+  if host then
+    if HideUIPanel then HideUIPanel(host) else host:Hide() end
+  end
+end
+
 local function openTargetTalents()
   if not UnitExists("target") or not UnitIsPlayer("target") then
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r target another player to inspect talents.")
@@ -2118,23 +2239,15 @@ local function openTargetTalents()
 
   local targetName=UnitName("target")
   if targetName and TI.currentName and targetName~=TI.currentName then
-    -- FR1e: target transition is an ownership boundary even when this open
-    -- came from the right-click menu rather than PLAYER_TARGET_CHANGED.
-    f:Hide()
-    hideButtons()
-    showBlankPane()
-    for i=1,3 do if f.tabs[i] then f.tabs[i]:Hide() end end
-    TI.currentData=nil
-    TI.currentName=targetName
-    TI.hoveredTalentButton=nil
-    if GameTooltip then GameTooltip:Hide() end
-    local hs=TI.hostState and TI.hostState.InspectFrame
-    if hs then
-      hs.name=targetName
-      hs.data=nil
-      hs.selectedTab=1
-    end
-    TI.selectedTab=1
+    resetInspectTalentView(targetName)
+  end
+
+  -- Never hand an out-of-range/invalid target to Blizzard_InspectUI.
+  -- On stock 1.12 this can leave InspectFrame with an invalid unit and later
+  -- trigger SetPortraitTexture(texture,"unit") usage errors.
+  if not targetCanBeInspectedSafely() then
+    closeInvalidInspectTarget()
+    return
   end
 
   if InspectUnit then InspectUnit("target") end
@@ -2209,11 +2322,17 @@ eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:RegisterEvent("CHARACTER_POINTS_CHANGED")
 eventFrame:RegisterEvent("SPELLS_CHANGED")
 eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+eventFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
 eventFrame:SetScript("OnEvent", function()
   if event=="PLAYER_LOGIN" then
     math.randomseed(time())
     if type(TalentInspectDB.cache)~="table" then TalentInspectDB.cache={} end
+    refreshGuildRosterNames()
     installNativeTabs()
+    return
+  end
+  if event=="GUILD_ROSTER_UPDATE" then
+    refreshGuildRosterNames()
     return
   end
   if event=="ADDON_LOADED" then
@@ -2224,38 +2343,18 @@ eventFrame:SetScript("OnEvent", function()
     return
   end
   if event=="PLAYER_TARGET_CHANGED" then
-    -- FR1e: one-shot ownership refresh only when the remote TalentInspect page
-    -- is already open. No polling, timer or retry loop is introduced here.
-    if TI.embeddedPrefix=="InspectFrame" and f:IsShown() and
-       UnitExists("target") and UnitIsPlayer("target") then
-      local newName=UnitName("target")
-      if newName and newName~="" and newName~=UnitName("player") and
-         newName~=TI.currentName then
+    -- One-shot ownership refresh only while TalentInspect owns InspectFrame.
+    if TI.embeddedPrefix=="InspectFrame" and f:IsShown() then
+      local newName=(UnitExists("target") and UnitIsPlayer("target")) and UnitName("target") or nil
 
-        -- Immediately invalidate the old player's visible page so even a
-        -- non-TalentInspect target can never inherit the previous build.
-        stopFallbackTimer()
-        hideNoSyncMessages()
-        f:Hide()
-        hideButtons()
-        showBlankPane()
-        for i=1,3 do if f.tabs[i] then f.tabs[i]:Hide() end end
-        TI.currentData=nil
-        TI.currentName=newName
-        TI.hoveredTalentButton=nil
-        if GameTooltip then GameTooltip:Hide() end
+      if not newName or newName==UnitName("player") or not targetCanBeInspectedSafely() then
+        closeInvalidInspectTarget()
+        return
+      end
 
-        local hs=TI.hostState and TI.hostState.InspectFrame
-        if hs then
-          hs.name=newName
-          hs.data=nil
-          hs.selectedTab=1
-        end
-        TI.selectedTab=1
-
-        -- Rebind Blizzard's InspectFrame once to the newly selected player,
-        -- then run the normal guarded TalentInspect open/request path.
-        if InspectUnit then InspectUnit("target") end
+      if newName~=TI.currentName then
+        resetInspectTalentView(newName)
+        -- openTargetTalents() performs the single guarded InspectUnit call.
         openTargetTalents()
       end
     end
@@ -2314,6 +2413,10 @@ eventFrame:SetScript("OnEvent", function()
   if cmd=="REQ" then
     local wanted=unsafe(a[2])
     local requester=unsafe(a[3])
+    TI.syncDiag=TI.syncDiag or {}
+    TI.syncDiag.lastReqSeen=wanted
+    TI.syncDiag.lastReqSender=sender
+    TI.syncDiag.lastReqChannel=channel
     if wanted==me and requester and requester~="" then
       sendLocalTo(requester,channel)
     end
@@ -2408,6 +2511,9 @@ eventFrame:SetScript("OnEvent", function()
   end
 
   if cmd=="BEGIN" then
+    TI.syncDiag=TI.syncDiag or {}
+    TI.syncDiag.lastBeginSender=sender
+    TI.syncDiag.lastBeginChannel=channel
     local s=a[3]
     local incomingName=unsafe(a[4])
     local incomingClass=unsafe(a[5])
@@ -2568,6 +2674,22 @@ SlashCmdList["TALENTINSPECT"]=function(msg)
         " state="..tostring(s.state).." sender="..tostring(s.sender)..
         " talents="..tostring(s.count or 0))
     end
+  elseif msg=="syncdebug" then
+    local name=TI.currentName or (UnitExists("target") and UnitName("target")) or "nil"
+    local channel=(name~="nil") and transportFor(name) or nil
+    local key=normalizePlayerName(name)
+    local d=TI.syncDiag or {}
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect syncdebug:|r target="..tostring(name)..
+      " transport="..tostring(channel or "NONE")..
+      " guildPeer="..tostring(key and TI.guildPeers[key] and 1 or 0)..
+      " roster="..tostring(key and TI.guildRosterNames[key] and 1 or 0))
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect syncdebug:|r lastRequest="..
+      tostring(d.lastRequestName or "nil").." via "..tostring(d.lastRequestChannel or "nil")..
+      " lastREQseen="..tostring(d.lastReqSeen or "nil")..
+      " from="..tostring(d.lastReqSender or "nil")..
+      " via="..tostring(d.lastReqChannel or "nil")..
+      " beginFrom="..tostring(d.lastBeginSender or "nil")..
+      " beginVia="..tostring(d.lastBeginChannel or "nil"))
   elseif msg=="synctime" then
     local name=TI.currentName
     local t=name and TI.syncTiming[name]
@@ -2584,7 +2706,7 @@ SlashCmdList["TALENTINSPECT"]=function(msg)
       DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r no completed sync timing for the current inspected player.")
     end
   elseif msg=="help" then
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect|r  /ti  /ti refresh  /ti cache  /ti learntalent  /ti learnsync  /ti synctime  /ti clearcache")
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect|r  /ti  /ti refresh  /ti cache  /ti learntalent  /ti learnsync  /ti syncdebug  /ti synctime  /ti clearcache")
   else
     openTargetTalents()
   end
