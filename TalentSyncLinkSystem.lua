@@ -11,7 +11,7 @@
 
 TalentSyncLinkSystem = TalentSyncLinkSystem or {}
 local L = TalentSyncLinkSystem
-L.VERSION = "1.0.0"
+L.VERSION = "1.0.3-GUARD2"
 L.LINKTYPE = "vptalent"
 
 local function normClass(c)
