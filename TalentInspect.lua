@@ -1653,7 +1653,7 @@ end
 local function showSyncSuccessStatus()
   -- STATUSGREEN1: once sync succeeds, positively confirm transport eligibility
   -- in the same top/left status position that shows the red failure message.
-  showNoSyncMessages("Target IN in party, raid, guild","Sync Data Load Successful","success")
+  showNoSyncMessages("Target IN party, raid, guild","Sync Data Load Successful","success")
   if f.noSyncLeft then
     f.noSyncLeft:SetTextColor(0.20,1.00,0.20)
   end
