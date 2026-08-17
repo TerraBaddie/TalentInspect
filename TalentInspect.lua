@@ -6,7 +6,7 @@ TalentInspectDB.cache = TalentInspectDB.cache or {}
 TalentInspectDB.cacheSchema = TalentInspectDB.cacheSchema or 1
 
 local TI = {}
-TI.VERSION = "1.0.3-GUARD2"
+TI.VERSION = "1.1.0"
 TI.PREFIX = "VPTI1"
 TI.selectedTab = 1
 TI.currentName = nil
@@ -33,6 +33,10 @@ TI.syncBeginAt = nil
 TI.syncCompleteAt = nil
 TI.syncExpectedName = nil
 TI.syncExpectedClass = nil
+TI.renderGeneration = TI.renderGeneration or 0
+TI.renderOwner = nil
+TI.lastServedRequest = {}
+TI.lastServedLearnRequest = {}
 
 local CLASS_COLORS = {
   WARRIOR={0.78,0.61,0.43}, MAGE={0.41,0.80,0.94}, ROGUE={1.00,0.96,0.41},
@@ -103,25 +107,36 @@ local function buildZeroTalentData(name,classToken,level)
     classToken=TalentInspectData_NormalizeClass(classToken)
   end
 
-  local d={name=name,class=classToken,level=level or 0,tabs={}}
+  -- TREEFIX1:
+  -- Empty/no-sync trees must ALWAYS get their identity from the packaged class
+  -- definition. Learned data is an overlay, never a replacement tree.
+  --
+  -- The old code preferred learnedClass.trees[p] wholesale. Older/incomplete
+  -- learned snapshots may contain talents/prereqs but no tree.name, causing
+  -- visible "Tree 1 / Tree 2 / Tree 3" labels after legacy clearcache/runtime
+  -- disruption.
+  local names=VPLUS_TREE_NAMES[classToken or ""]
   local bgNames=VPLUS_TREE_BACKGROUNDS[classToken or ""]
+  local d={name=name,class=classToken,level=level or 0,tabs={}}
+
+  local learnedClass=TalentInspectData_GetLearnedClass and
+                     TalentInspectData_GetLearnedClass(classToken)
 
   for p=1,3 do
-    local tree=nil
-    local learnedClass=TalentInspectData_GetLearnedClass and TalentInspectData_GetLearnedClass(classToken)
-    if learnedClass and learnedClass.trees then tree=learnedClass.trees[p] end
-    if not tree then tree=TalentInspectData_GetTree and TalentInspectData_GetTree(classToken,p) end
-    if tree then
+    local staticTree=TalentInspectData_GetTree and TalentInspectData_GetTree(classToken,p)
+    local learnedTree=learnedClass and learnedClass.trees and learnedClass.trees[p]
+
+    if staticTree then
       local tab={
-        name=tree.name or ("Tree "..p),
-        icon=tree.icon and ("Interface\\Icons\\"..tree.icon) or "",
+        name=(names and names[p]) or staticTree.name or ("Tree "..p),
+        icon=staticTree.icon and ("Interface\\Icons\\"..staticTree.icon) or "",
         points=0,
-        fileName=(bgNames and bgNames[p]) or tree.background or "",
+        fileName=(bgNames and bgNames[p]) or staticTree.background or "",
         talents={}
       }
 
-      -- First pass: create every talent at rank zero using real in-game icon paths.
-      for idx,st in pairs(tree.talents or {}) do
+      -- Static packaged tree owns the complete talent roster/geometry.
+      for idx,st in pairs(staticTree.talents or {}) do
         local tier=st.tier
         local col=st.col
         if (not tier or not col) and st.pos then
@@ -135,6 +150,25 @@ local function buildZeroTalentData(name,classToken,level)
           icon="Interface\\Icons\\"..icon
         end
 
+        local liveOverlay=nil
+        if learnedTree and learnedTree.byName then
+          liveOverlay=learnedTree.byName[st.name] or
+                      (st.sourceName and learnedTree.byName[st.sourceName])
+        end
+
+        local preTier=nil
+        local preCol=nil
+        local preRank=nil
+        local prereqScanned=nil
+
+        -- Learned prerequisite authority overlays only the matching talent.
+        if liveOverlay and liveOverlay.prereqScanned==1 then
+          preTier=liveOverlay.preTier
+          preCol=liveOverlay.preCol
+          preRank=liveOverlay.preRank
+          prereqScanned=1
+        end
+
         tab.talents[idx]={
           index=idx,
           name=st.name or st.sourceName or ("Talent "..idx),
@@ -142,17 +176,17 @@ local function buildZeroTalentData(name,classToken,level)
           tier=tier or 1,
           col=col or 1,
           rank=0,
-          maxRank=st.maxRank or 1,
-          preTier=(st.prereqScanned==1 and st.preTier) or 0,
-          preCol=(st.prereqScanned==1 and st.preCol) or 0,
-          preRank=(st.prereqScanned==1 and st.preRank) or nil,
-          prereqScanned=st.prereqScanned
+          maxRank=(liveOverlay and liveOverlay.maxRank) or st.maxRank or 1,
+          preTier=preTier or 0,
+          preCol=preCol or 0,
+          preRank=preRank,
+          prereqScanned=prereqScanned
         }
       end
 
-      -- Second pass: restore prerequisite geometry so the empty tree still
-      -- looks like the real tree, including its dependency arrows.
-      for idx,st in pairs(tree.talents or {}) do
+      -- Static prerequisite fallback applies only when a live learned scan has
+      -- not authoritatively supplied/removed the prerequisite.
+      for idx,st in pairs(staticTree.talents or {}) do
         if st.prereq and tab.talents[idx] and tab.talents[idx].prereqScanned~=1 then
           for _,pre in pairs(tab.talents) do
             if pre.name==st.prereq then
@@ -222,38 +256,35 @@ end
 -- 1.12 SendAddonMessage only supports PARTY / RAID / GUILD / BATTLEGROUND.
 -- There is NO hidden addon WHISPER transport in stock 1.12.
 TI.outbox = TI.outbox or {}
+TI.outboxHead = 1
 TI.outboxElapsed = 0
-
 local syncPump=CreateFrame("Frame")
 
 local function sendNow(msg, channel)
-  if SendAddonMessage and msg and channel then
-    SendAddonMessage(TI.PREFIX,msg,channel)
-  end
+  if SendAddonMessage and msg and channel then SendAddonMessage(TI.PREFIX,msg,channel) end
 end
-
+local function outboxCount()
+  local n=table.getn(TI.outbox)
+  if n<TI.outboxHead then return 0 end
+  return n-TI.outboxHead+1
+end
 local function TalentInspect_SyncPumpUpdate()
-  if not TI.outbox or table.getn(TI.outbox)==0 then
-    this:SetScript("OnUpdate",nil)
-    TI.outboxElapsed=0
-    return
+  if outboxCount()<=0 then
+    TI.outbox={}; TI.outboxHead=1; this:SetScript("OnUpdate",nil); TI.outboxElapsed=0; return
   end
   TI.outboxElapsed=TI.outboxElapsed+(arg1 or 0)
   if TI.outboxElapsed<0.06 then return end
   TI.outboxElapsed=0
-  local item=table.remove(TI.outbox,1)
+  local item=TI.outbox[TI.outboxHead]
+  TI.outbox[TI.outboxHead]=nil
+  TI.outboxHead=TI.outboxHead+1
   if item then sendNow(item.msg,item.channel) end
-  if table.getn(TI.outbox)==0 then
-    this:SetScript("OnUpdate",nil)
-  end
+  if outboxCount()<=0 then TI.outbox={}; TI.outboxHead=1; this:SetScript("OnUpdate",nil) end
 end
-
 local function queueSend(msg, channel)
   if not msg or not channel then return end
   table.insert(TI.outbox,{msg=msg,channel=channel})
-  if not syncPump:GetScript("OnUpdate") then
-    syncPump:SetScript("OnUpdate",TalentInspect_SyncPumpUpdate)
-  end
+  if not syncPump:GetScript("OnUpdate") then syncPump:SetScript("OnUpdate",TalentInspect_SyncPumpUpdate) end
 end
 
 local function isNameInRaid(name)
@@ -368,16 +399,12 @@ end
 local function sendLearnedAdvertisement(target,channel)
   if not TalentInspectHelper or not target or not channel then return end
 
-  -- FR4h: a PLAYER_LOGIN scan can occur before VanillaPlus has finished
-  -- exposing its final hotfixed talent tooltip text.  The first real peer
-  -- sync is therefore a safe authoritative refresh point.  This is NOT
-  -- continuous polling: it runs only when another TalentInspect client
-  -- actually requests/receives learned-data advertisement.
-  if TalentInspectHelper.ScanCurrentClass then
-    TalentInspectHelper:ScanCurrentClass("peer-sync-authoritative-refresh",1)
+  local d
+  if TalentInspectHelper.EnsureFreshForPeerSync then
+    d=TalentInspectHelper:EnsureFreshForPeerSync()
+  else
+    d=TalentInspectHelper:GetOwnLearnedClass()
   end
-
-  local d=TalentInspectHelper:GetOwnLearnedClass()
   if not d then return end
   queueSend("LADV^"..safe(target).."^"..safe(d.class).."^"..safe(TalentInspectHelper:GetFingerprint(d.class)),channel)
 end
@@ -425,24 +452,41 @@ local function sendLearnedClass(target,channel,classToken,receiverFP)
 end
 
 local function cacheData(d)
-  if d and d.name then
-    d.stamp = time and time() or 0
-    TalentInspectDB.cache[d.name] = d
+  if not d or not d.name then return end
+  d.stamp=time and time() or 0
+  TalentInspectDB.cache[d.name]=d
+  local count=0
+  for _ in pairs(TalentInspectDB.cache) do count=count+1 end
+  while count>40 do
+    local oldestName=nil; local oldestStamp=nil
+    for name,entry in pairs(TalentInspectDB.cache) do
+      if name~=d.name then
+        local stamp=(entry and tonumber(entry.stamp)) or 0
+        if not oldestStamp or stamp<oldestStamp then oldestStamp=stamp; oldestName=name end
+      end
+    end
+    if not oldestName then break end
+    TalentInspectDB.cache[oldestName]=nil
+    count=count-1
   end
 end
 
 local function clearTalentCache()
+  -- CACHEFIX1:
+  -- /ti clearcache is a persistence operation, NOT a live UI reset.
+  --
+  -- The old implementation destroyed TI.currentData, pending sync state and
+  -- every hostState while TalentInspect/Blizzard InspectFrame could still be
+  -- rendering those exact tables.  That immediately collapsed the visible
+  -- tree to "Tree 1/2/3 0" and created an unsafe mid-frame state on the old
+  -- 1.12 client.
+  --
+  -- Only detach the SavedVariables cache here.  Any currently displayed data
+  -- remains alive until the normal target/tab/inspect lifecycle replaces it.
+  -- A fresh table also means the old cache becomes collectible naturally
+  -- after no live UI references remain.
   TalentInspectDB.cache = {}
   TalentInspectDB.cacheSchema = 1
-  TI.pending = {}
-  TI.currentData = nil
-  if TI.hostState then
-    for _,state in pairs(TI.hostState) do
-      state.name=nil
-      state.data=nil
-      state.selectedTab=1
-    end
-  end
 end
 
 -- UI -------------------------------------------------------------------------
@@ -519,18 +563,25 @@ end
 
 local function setEmbeddedMode(host)
   if not host then return end
-  TI.embeddedHost = host
-  f:SetParent(host)
-  f:SetMovable(0)
-  -- The large wrapper is visual/layout only. Do not let it intercept native
-  -- Character/Pet/Reputation/Skills/Honor tab clicks underneath.
-  f:EnableMouse(0)
-  f:ClearAllPoints()
 
-  -- Stay completely inside the original Character/Inspect frame.
-  -- Native header and native Character/Honor/Talents tabs remain visible.
-  f:SetPoint("TOPLEFT",host,"TOPLEFT",14,-42)
-  f:SetPoint("BOTTOMRIGHT",host,"BOTTOMRIGHT",-14,39)
+  local hostChanged=(TI.embeddedHost~=host) or
+                    (f.GetParent and f:GetParent()~=host)
+  TI.embeddedHost = host
+
+  -- DEEPHARDEN1: reparent/anchor only when ownership actually changes.
+  -- Repeated cache/sync/tab renders should not churn the legacy frame tree.
+  if hostChanged then
+    f:Hide()
+    f:SetParent(host)
+    f:SetMovable(0)
+    f:EnableMouse(0)
+    f:ClearAllPoints()
+    f:SetPoint("TOPLEFT",host,"TOPLEFT",14,-42)
+    f:SetPoint("BOTTOMRIGHT",host,"BOTTOMRIGHT",-14,39)
+  else
+    f:SetMovable(0)
+    f:EnableMouse(0)
+  end
   -- Custom 1.12 character UIs can place PaperDoll/overlays above their parent.
   -- Never inherit the host strata: keep the Talents page decisively above
   -- native subframes while still parented/locked to CharacterFrame/InspectFrame.
@@ -890,7 +941,17 @@ TalentInspect_UpdateScrollRange()
 
 local function setTreeBackground(fileName)
   if f.blankPane then f.blankPane:Hide() end
-  if f.treeBackgroundClip then f.treeBackgroundClip:Show() end
+  if f.scroll then f.scroll:Show() end
+  if f.canvas then f.canvas:Show() end
+  if f.treeBackground then f.treeBackground:Show() end
+  if f.treeBackgroundClip then
+    f.treeBackgroundClip:Show()
+    f.treeBackgroundClip:SetFrameLevel(f:GetFrameLevel()+10)
+  end
+  if f.treeBackground then f.treeBackground:SetFrameLevel(f:GetFrameLevel()+9) end
+  if f.scroll then f.scroll:SetFrameLevel(f:GetFrameLevel()+30) end
+  if f.canvas then f.canvas:SetFrameLevel(f:GetFrameLevel()+31) end
+
   local base = "Interface\\TalentFrame\\"..(fileName or "MageFire").."-"
   for i=1,4 do
     tiles[i]:SetTexture(base..tileNames[i])
@@ -933,7 +994,7 @@ local renderStaticTalentTooltip
 
 local function makeTalentButton(i)
   local b=CreateFrame("Button","TalentInspectTalent"..i,f.canvas,"TalentInspectTalentButtonTemplate")
-  b:SetFrameLevel(f.scroll:GetFrameLevel()+35)
+  b:SetFrameLevel((f.canvas and f.canvas:GetFrameLevel() or f.scroll:GetFrameLevel())+35)
   b.icon=getglobal(b:GetName().."Icon")
   b.rankBG=getglobal(b:GetName().."RankBG")
   b.rank=getglobal(b:GetName().."Rank")
@@ -1202,12 +1263,20 @@ local function selectTab(page)
   end
   local d=TI.currentData
   if not d or not d.tabs or not d.tabs[page] then return end
+  if f.blankPane then f.blankPane:Hide() end
+  if f.scroll then f.scroll:Show() end
+  if f.canvas then f.canvas:Show() end
   hideButtons()
   local tab=d.tabs[page]
   f.treeTitle:SetText((tab.name or "Talent Tree").."  |cffffffff"..(tab.points or 0).." points|r")
   -- FR3d: never let a remote/cached fileName choose another class's artwork.
   local canonicalBG=canonicalTreeBackground(d.class,page)
   setTreeBackground(canonicalBG or tab.fileName)
+  if f.scrollBar then
+    TalentInspect_UpdateScrollRange()
+    f.scrollBar:SetValue(0)
+    f.scroll:SetVerticalScroll(0)
+  end
   local n=0
   for i,t in pairs(tab.talents or {}) do
     n=n+1
@@ -1224,8 +1293,13 @@ local function selectTab(page)
     local x=GRID_X0+(t.col-1)*GRID_X
     local y=-GRID_Y0-(t.tier-1)*GRID_Y
     b:SetPoint("TOPLEFT",f.canvas,"TOPLEFT",x,y)
-    b.icon:SetTexture(t.icon)
-    b.icon:SetAlpha(1)
+    b:SetFrameLevel((f.canvas and f.canvas:GetFrameLevel() or f:GetFrameLevel())+35)
+    b:EnableMouse(1)
+    if b.icon then
+      b.icon:SetTexture(t.icon)
+      b.icon:SetAlpha(1)
+      b.icon:Show()
+    end
     local rank=t.rank or 0
 
     -- FR1c: SetTexture() can refresh renderer state on legacy/custom clients.
@@ -1262,7 +1336,7 @@ local function selectTab(page)
     end
     if b.highlight then b.highlight:SetAlpha(0.18) end
     b:Show()
-    drawPrereq(prerequisiteTalentForRender(d,page,t,b.static), i)
+    -- v1.1.0 release: prerequisite connector rendering is intentionally disabled.
   end
   for i=1,3 do
     local bt=f.tabs[i]
@@ -1356,6 +1430,20 @@ end
 -- re-anchor it only when the Talents tab is selected.
 f:Hide()
 
+local function validCachedBuild(d)
+  if not d or not d.name or not d.class or not d.tabs then return nil end
+  local names=VPLUS_TREE_NAMES[d.class]
+  if not names then return nil end
+  for p=1,3 do
+    local tab=d.tabs[p]
+    if not tab or not tab.name or tab.name=="" or
+       tab.name=="Tree "..p or not tab.talents then
+      return nil
+    end
+  end
+  return 1
+end
+
 local function cachedStatus(d)
   if not d or not d.stamp or d.stamp<=0 or not time then return "Cached" end
   local age=time()-d.stamp
@@ -1375,8 +1463,14 @@ local function showData(d, status)
   if d.class and TalentInspectData_NormalizeClass then
     d.class=TalentInspectData_NormalizeClass(d.class)
   end
+  local canonicalNames=VPLUS_TREE_NAMES[d.class or ""]
   for p=1,3 do
     if d.tabs and d.tabs[p] then
+      -- Never display generic legacy "Tree N" labels when class identity is known.
+      if canonicalNames and canonicalNames[p] and
+         (not d.tabs[p].name or d.tabs[p].name=="" or d.tabs[p].name=="Tree "..p) then
+        d.tabs[p].name=canonicalNames[p]
+      end
       d.tabs[p].fileName=canonicalTreeBackground(d.class,p) or d.tabs[p].fileName
     end
   end
@@ -1434,7 +1528,32 @@ local function nowSeconds()
   return 0
 end
 
+local function pruneTransientSyncState()
+  local now=nowSeconds()
+  local cutoff=30
+
+  for session,d in pairs(TI.pending or {}) do
+    if d and d.startedAt and (now-d.startedAt)>cutoff then
+      TI.pending[session]=nil
+    end
+  end
+  for classToken,d in pairs(TI.learnPending or {}) do
+    if d and d.startedAt and (now-d.startedAt)>cutoff then
+      TI.learnPending[classToken]=nil
+      if TalentInspectHelper and TalentInspectHelper.AbortPeerClass then
+        TalentInspectHelper:AbortPeerClass(classToken)
+      end
+    end
+  end
+  for key,d in pairs(TI.learnDescParts or {}) do
+    if d and d.startedAt and (now-d.startedAt)>cutoff then
+      TI.learnDescParts[key]=nil
+    end
+  end
+end
+
 local function beginSyncTiming(name)
+  pruneTransientSyncState()
   TI.syncActiveName=name
   TI.syncRequestStarted=nowSeconds()
   TI.syncBeginAt=nil
@@ -1472,6 +1591,16 @@ local function markSyncComplete(name)
   end
 
   TI.syncTiming[name]=t
+  local count=0
+  for _ in pairs(TI.syncTiming) do count=count+1 end
+  if count>40 then
+    for oldName in pairs(TI.syncTiming) do
+      if oldName~=name then
+        TI.syncTiming[oldName]=nil; count=count-1
+        if count<=40 then break end
+      end
+    end
+  end
 end
 
 local fallbackDriver=CreateFrame("Frame")
@@ -1479,16 +1608,55 @@ local fallbackDriver=CreateFrame("Frame")
 local function stopFallbackTimer()
   TI.fallbackName=nil
   TI.fallbackClass=nil
+  TI.fallbackGeneration=nil
   TI.fallbackElapsed=0
   fallbackDriver:SetScript("OnUpdate",nil)
+  fallbackDriver:Hide()
 end
 
-local function showNoSyncMessages(leftText,rightText)
+local function showNoSyncMessages(leftText,rightText,rightState)
   if not f.noSyncLeft or not f.noSyncRight then return end
-  f.noSyncLeft:SetText(leftText or "Target not in party, raid, guild")
-  f.noSyncRight:SetText(rightText or "No TalentInspect Sync Data")
-  f.noSyncLeft:Show()
-  f.noSyncRight:Show()
+
+  if leftText and leftText~="" then
+    f.noSyncLeft:SetText(leftText)
+    if leftText=="Target not in party, raid, guild" then
+      f.noSyncLeft:SetTextColor(1,0.15,0.15)
+    else
+      f.noSyncLeft:SetTextColor(0.70,0.70,0.70)
+    end
+    f.noSyncLeft:Show()
+  else
+    f.noSyncLeft:Hide()
+  end
+
+  if rightText and rightText~="" then
+    f.noSyncRight:SetText(rightText)
+    if rightState=="success" then
+      f.noSyncRight:SetTextColor(0.20,1.00,0.20)
+    else
+      f.noSyncRight:SetTextColor(0.70,0.70,0.70)
+    end
+    f.noSyncRight:Show()
+  else
+    f.noSyncRight:Hide()
+  end
+end
+
+local function showBlankLoadedStatus(noTransport)
+  showNoSyncMessages(
+    noTransport and "Target not in party, raid, guild" or nil,
+    "No Sync Data Blank Loaded",
+    "blank"
+  )
+end
+
+local function showSyncSuccessStatus()
+  -- STATUSGREEN1: once sync succeeds, positively confirm transport eligibility
+  -- in the same top/left status position that shows the red failure message.
+  showNoSyncMessages("Target IN in party, raid, guild","Sync Data Load Successful","success")
+  if f.noSyncLeft then
+    f.noSyncLeft:SetTextColor(0.20,1.00,0.20)
+  end
 end
 
 local function hideNoSyncMessages()
@@ -1497,10 +1665,10 @@ local function hideNoSyncMessages()
 end
 
 local function showZeroTalentFallback(name,classToken,leftText,rightText)
-  if not name or not classToken then return end
+  if not name or not classToken then return nil end
 
   local d=buildZeroTalentData(name,classToken,UnitLevel("target"))
-  if not d or not d.tabs or not d.tabs[1] then return end
+  if not d or not d.tabs or not d.tabs[1] then return nil end
 
   TI.currentName=name
   TI.currentData=d
@@ -1517,17 +1685,24 @@ local function showZeroTalentFallback(name,classToken,leftText,rightText)
   -- Explicitly render tree 1 after the static zero data is bound. The other
   -- two tree tabs remain live and switch to their own complete zero-rank trees.
   selectTab(1)
-  showNoSyncMessages(leftText,rightText)
+  showBlankLoadedStatus(leftText=="Target not in party, raid, guild")
+  return 1
 end
 
 local function startFallbackTimer(name,classToken,leftText,rightText)
   stopFallbackTimer()
   TI.fallbackName=name
   TI.fallbackClass=classToken
+  TI.fallbackGeneration=TI.renderGeneration
   TI.fallbackElapsed=0
 
-  showNoSyncMessages(leftText,rightText)
+  if leftText=="Target not in party, raid, guild" then
+    showNoSyncMessages("Target not in party, raid, guild",nil,nil)
+  else
+    hideNoSyncMessages()
+  end
 
+  fallbackDriver:Show()
   fallbackDriver:SetScript("OnUpdate",function()
     -- Never allow empty fallback to race a real sync that has started.
     if TI.syncActiveName==TI.fallbackName and TI.syncBeginAt then
@@ -1540,66 +1715,63 @@ local function startFallbackTimer(name,classToken,leftText,rightText)
 
     local wanted=TI.fallbackName
     local class=TI.fallbackClass
+    local generation=TI.fallbackGeneration
     stopFallbackTimer()
 
     if TI.embeddedPrefix=="InspectFrame" and f:IsShown() and
        wanted and wanted==TI.currentName and
+       generation==TI.renderGeneration and TI.renderOwner==wanted and
        not (TI.syncActiveName==wanted and TI.syncBeginAt) then
-      showZeroTalentFallback(
-        wanted,
-        class,
-        leftText or "Target not in party, raid, guild",
-        rightText or "No TalentInspect Sync Data"
-      )
+      -- NOBLANK2: the full provisional tree already exists. Timeout changes
+      -- status only; it never rebuilds or blanks the page.
+      showBlankLoadedStatus(false)
     end
   end)
 end
 
 local function showNoTransport(name)
-  hideButtons()
-  showBlankPane()
+  stopFallbackTimer()
 
   local _,classToken=UnitClass("target")
   if TalentInspectData_NormalizeClass then
     classToken=TalentInspectData_NormalizeClass(classToken)
   end
 
-  local names=VPLUS_TREE_NAMES[classToken or ""]
-  if names and names[1] then
-    f.treeTitle:SetText(names[1].." 0 points")
-  else
-    f.treeTitle:SetText("Talents 0 points")
-  end
-  for i=1,3 do
-    if f.tabs[i] then
-      if names and names[i] then
-        f.tabs[i].text:SetText(names[i].." 0")
-        f.tabs[i]:Show()
-
-        -- FR2-XML4: skin the tab immediately during the six-second waiting
-        -- state. Previously the XML default/pfUI-looking layer remained visible
-        -- until selectTab() ran after fallback data was rendered.
-        updateSpecButtonVisual(f.tabs[i], i==1)
-      else
-        f.tabs[i]:Hide()
-      end
+  -- NOCHANNELFIX1:
+  -- No PARTY/RAID/GUILD transport means a real sync CANNOT start, so there is
+  -- nothing useful to wait 1.5 seconds for. The old path parked the legacy
+  -- InspectFrame on BlankPane and depended on an OnUpdate transition. The
+  -- supplied video shows that transition can fail and leave the client in a
+  -- permanently black custom inspect page before #132.
+  --
+  -- Build the complete packaged gray 0/0/0 tree immediately instead.
+  if name and classToken then
+    if showZeroTalentFallback(
+      name,
+      classToken,
+      "Target not in party, raid, guild",
+      nil
+    ) then
+      return
     end
   end
 
-  f.title:SetText(name or "Unknown")
-  f.subtitle:SetText("TalentInspect sync")
-  if TI.embeddedHost then f:Show() end
-
-  startFallbackTimer(
-    name,
-    classToken,
-    "WoW 1.12 sync requires party, raid, or guild",
-    "No TalentInspect Sync Data"
-  )
+  -- If even target class identity vanished during this exact transition, do
+  -- not leave an ownerless black page alive.
+  hideButtons()
+  showBlankPane()
+  showNoSyncMessages("Target not in party, raid, guild",nil,nil)
+  f:Hide()
+  closeInvalidInspectTarget()
 end
 
 local function request(name)
   if not name or name=="" then return end
+
+  TI.renderGeneration=(TI.renderGeneration or 0)+1
+  TI.renderOwner=name
+  local requestGeneration=TI.renderGeneration
+
   TI.currentName=name
   beginSyncTiming(name)
 
@@ -1610,6 +1782,13 @@ local function request(name)
   end
   TI.syncExpectedClass=expectedClass
   local cached=TalentInspectDB.cache[name]
+  if cached and not validCachedBuild(cached) then
+    -- TREEFIX1: quarantine a malformed legacy cache entry instead of rendering
+    -- generic Tree 1/2/3 state. This repairs players previously affected by
+    -- the destructive old /ti clearcache behavior on their next inspection.
+    TalentInspectDB.cache[name]=nil
+    cached=nil
+  end
   if cached and cached.name==name and TI.embeddedPrefix=="InspectFrame" then
     local hs=TI.hostState.InspectFrame
     hs.name=name
@@ -1630,25 +1809,22 @@ local function request(name)
   end
 
   if not cached then
-    hideButtons()
-    showBlankPane()
-    f.treeTitle:SetText("Requesting talents...")
-    for i=1,3 do if f.tabs[i] then f.tabs[i]:Hide() end end
-    f.title:SetText(name)
-    f.subtitle:SetText("Requesting VanillaPlus talents via "..channel)
-    f.status:SetText("Waiting for addon response")
-    if TI.embeddedHost then f:Show() end
-
     local _,classToken=UnitClass("target")
     if TalentInspectData_NormalizeClass then
       classToken=TalentInspectData_NormalizeClass(classToken)
     end
-    startFallbackTimer(
-      name,
-      classToken,
-      "Waiting for TalentInspect response",
-      "No TalentInspect Sync Data"
-    )
+
+    -- NOBLANK2: always establish a complete packaged tree before networking.
+    if not showZeroTalentFallback(name,classToken,nil,nil) then
+      f:Hide()
+      closeInvalidInspectTarget()
+      return
+    end
+
+    -- Valid transport: provisional gray tree stays visible while BEGIN gets
+    -- its 1.5-second chance. Do not show the gray timeout label yet.
+    hideNoSyncMessages()
+    startFallbackTimer(name,classToken,nil,nil)
   end
 
   -- Address the request inside the payload; the valid 1.12 transport itself is shared.
@@ -1913,7 +2089,7 @@ local function hideHostPages(prefix)
 end
 
 local function showEmbeddedTalents(host, prefix)
-  if not host or prefix~="InspectFrame" then return end
+  if not host or prefix~="InspectFrame" then return nil end
 
   hideHostPages(prefix)
   TI.embeddedPrefix=prefix
@@ -1922,8 +2098,11 @@ local function showEmbeddedTalents(host, prefix)
   -- Resolve ownership BEFORE showing the reusable TalentInspect canvas.
   local name=hostPlayerName(host,prefix)
   if not name or name=="" or name==UnitName("player") then
+    -- OPENFIX1: InspectUnit/InspectFrame identity can lag by a frame or two.
+    -- Do NOT treat a host with no resolved inspected name as successfully
+    -- embedded, otherwise the custom tab can sit on an empty page forever.
     f:Hide()
-    return
+    return nil
   end
 
   local hs=TI.hostState.InspectFrame
@@ -1934,8 +2113,15 @@ local function showEmbeddedTalents(host, prefix)
   if TI.currentName~=name or (hs and hs.name and hs.name~=name) then
     f:Hide()
     hideButtons()
-    showBlankPane()
+
+    -- DEEPHARDEN1/NOBLANK3: player transition is teardown only. Never arm the
+    -- black BlankPane during a normal inspect transition.
+    if f.blankPane then f.blankPane:Hide() end
+    if f.treeBackgroundClip then f.treeBackgroundClip:Hide() end
+    if f.treeBackground then f.treeBackground:Hide() end
+    for i=1,4 do if tiles[i] then tiles[i]:Hide() end end
     for i=1,3 do if f.tabs[i] then f.tabs[i]:Hide() end end
+
     TI.currentData=nil
     TI.currentName=name
     TI.hoveredTalentButton=nil
@@ -1960,21 +2146,25 @@ local function showEmbeddedTalents(host, prefix)
     end
     showData(cached,cachedStatus(cached))
   else
+    -- Do not show an empty custom page. request(name) immediately renders the
+    -- packaged provisional 0/0/0 tree before networking can matter.
     hideButtons()
-    showBlankPane()
-    f.treeTitle:SetText("Requesting talents...")
+    if f.blankPane then f.blankPane:Hide() end
+    f.treeTitle:SetText("")
     f.title:SetText(name)
-    f.subtitle:SetText("TalentInspect sync")
-    f.status:SetText("Waiting for "..name)
-    f:Show()
+    f.subtitle:SetText("")
+    f.status:SetText("")
   end
 
   request(name)
   if f.Raise then f:Raise() end
+  return 1
 end
 
 local function hideEmbeddedForHost(host)
   if TI.embeddedHost==host then
+    stopFallbackTimer()
+    if f.blankPane then f.blankPane:Hide() end
     f:Hide()
     TI.embeddedHost=nil
     TI.embeddedPrefix=nil
@@ -2098,7 +2288,13 @@ local function installNativeTab(prefix)
   tab:SetScript("OnClick",function()
     PlaySound("igCharacterInfoTab")
     if PanelTemplates_SetTab then PanelTemplates_SetTab(host,newIndex) end
-    showEmbeddedTalents(host,prefix)
+
+    -- DEEPHARDEN1: native tab clicks are user-facing entry points too.
+    -- Do not synchronously hide pages/render/request from the click callback.
+    local name=hostPlayerName(host,prefix)
+    if TI.QueueSafeEmbed and name and name~="" then
+      TI.QueueSafeEmbed(host,prefix,name)
+    end
   end)
 
   -- Match installed pfUI instead of fighting it.
@@ -2158,9 +2354,6 @@ local function installNativeTabs()
   installInspectFrameGuard()
 end
 
-local pendingNativeOpen=nil
-local pendingNativeElapsed=0
-
 local function clickTalentTabFor(prefix)
   local host=getglobal(prefix)
   local tab=installNativeTab(prefix)
@@ -2169,13 +2362,18 @@ local function clickTalentTabFor(prefix)
   local id=tab:GetID()
   if PanelTemplates_SetTab then PanelTemplates_SetTab(host,id) end
 
-  -- ShowUIPanel / CharacterFrame OnShow can resurrect the default paper doll.
-  -- Hide native pages immediately before AND after embedding our Talents page.
   hideHostPages(prefix)
-  showEmbeddedTalents(host,prefix)
-  hideHostPages(prefix)
+  local embedded=showEmbeddedTalents(host,prefix)
 
-  return 1
+  if embedded then
+    hideHostPages(prefix)
+    return 1
+  end
+
+  -- OPENFIX1: identity is not ready yet. Restore native Inspect visibility
+  -- instead of leaving a selected Talents tab with every page hidden.
+  f:Hide()
+  return nil
 end
 
 local function openSelfTalents()
@@ -2184,6 +2382,11 @@ local function openSelfTalents()
   -- to another player's addon request, but renders no duplicate local tree.
   DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r local talents use the normal Talents window (N). TalentInspect is for inspecting other players.")
 end
+
+-- OPENFIX1 forward state for bounded InspectFrame open retry.
+-- Declared here so reset/close paths can cancel it safely.
+local pendingNativeOpen
+local pendingNativeElapsed=0
 
 targetCanBeInspectedSafely = function()
   if not UnitExists("target") or not UnitIsPlayer("target") then return nil end
@@ -2197,12 +2400,22 @@ targetCanBeInspectedSafely = function()
 end
 
 local function resetInspectTalentView(newName)
+  pendingNativeOpen=nil
   stopFallbackTimer()
   hideNoSyncMessages()
   f:Hide()
   hideButtons()
-  showBlankPane()
+
+  -- TARGETSAFE1/NOBLANK2:
+  -- reset is teardown, not a render state. Do not turn BlankPane on, because a
+  -- later host re-show can expose stale transitional black content.
+  if f.blankPane then f.blankPane:Hide() end
+  if f.treeBackgroundClip then f.treeBackgroundClip:Hide() end
+  if f.treeBackground then f.treeBackground:Hide() end
+  for i=1,4 do if tiles[i] then tiles[i]:Hide() end end
   for i=1,3 do if f.tabs[i] then f.tabs[i]:Hide() end end
+  TI.renderGeneration=(TI.renderGeneration or 0)+1
+  TI.renderOwner=nil
   TI.currentData=nil
   TI.currentName=newName
   TI.hoveredTalentButton=nil
@@ -2224,7 +2437,7 @@ closeInvalidInspectTarget = function()
   end
 end
 
-local function openTargetTalents()
+local function openTargetTalentsImpl()
   if not UnitExists("target") or not UnitIsPlayer("target") then
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r target another player to inspect talents.")
     return
@@ -2250,19 +2463,34 @@ local function openTargetTalents()
     return
   end
 
+  -- OPENFIX1: call legacy InspectUnit exactly ONCE per user open.
+  -- Repeated InspectUnit/ShowUIPanel calls during frame initialization are
+  -- avoided; old 1.12 clients are much safer when we wait for the host identity.
   if InspectUnit then InspectUnit("target") end
 
   installNativeTabs()
   local host=getglobal("InspectFrame")
   if host then
     if ShowUIPanel then ShowUIPanel(host) else host:Show() end
-    if clickTalentTabFor("InspectFrame") then return end
+    if clickTalentTabFor("InspectFrame") then return 1 end
   end
 
-  -- Custom 1.12 UIs may instantiate InspectFrame one or two frames later.
-  pendingNativeOpen={kind="target",tries=0}
+  -- InspectFrame exists but its inspected-player identity can become valid a
+  -- little later. Retry ONLY the lightweight embed step.
+  pendingNativeOpen={kind="target",tries=0,targetName=targetName,
+    generation=TI.renderGeneration}
   pendingNativeElapsed=0
   startNativeOpenDriver()
+end
+
+
+local openTransactionBusy=nil
+local function openTargetTalents()
+  if openTransactionBusy then return nil end
+  openTransactionBusy=1
+  local result=openTargetTalentsImpl()
+  openTransactionBusy=nil
+  return result
 end
 
 -- SAFE3:
@@ -2284,23 +2512,52 @@ local function TalentInspect_NativeOpenUpdate()
   end
 
   pendingNativeElapsed=pendingNativeElapsed+(arg1 or 0)
-  if pendingNativeElapsed<0.10 then return end
+  if pendingNativeElapsed<0.15 then return end
   pendingNativeElapsed=0
-  pendingNativeOpen.tries=(pendingNativeOpen.tries or 0)+1
 
-  installNativeTabs()
-
-  local prefix="InspectFrame"
-  local host=getglobal(prefix)
-  local done=nil
-  if host then
-    if ShowUIPanel then ShowUIPanel(host) else host:Show() end
-    done=clickTalentTabFor(prefix)
-  end
-
-  if done or pendingNativeOpen.tries>=8 then
+  -- Target ownership changed/disappeared while InspectFrame was settling.
+  local expected=pendingNativeOpen.targetName
+  local expectedGeneration=pendingNativeOpen.generation
+  if not expected or expectedGeneration~=TI.renderGeneration or
+     not UnitExists("target") or not UnitIsPlayer("target") or
+     UnitName("target")~=expected or not targetCanBeInspectedSafely() then
     pendingNativeOpen=nil
     this:SetScript("OnUpdate",nil)
+    closeInvalidInspectTarget()
+    return
+  end
+
+  pendingNativeOpen.tries=(pendingNativeOpen.tries or 0)+1
+  local host=getglobal("InspectFrame")
+  local done=nil
+  if host and host:IsShown() then
+    -- Lightweight retry only. Never call InspectUnit or ShowUIPanel again here.
+    done=clickTalentTabFor("InspectFrame")
+  end
+
+  if done then
+    pendingNativeOpen=nil
+    this:SetScript("OnUpdate",nil)
+    return
+  end
+
+  -- Hard stop after 5 attempts (~0.75s). Never leave an infinitely blank
+  -- TalentInspect page alive if Blizzard never exposes valid inspect ownership.
+  if pendingNativeOpen.tries>=5 then
+    pendingNativeOpen=nil
+    this:SetScript("OnUpdate",nil)
+    stopFallbackTimer()
+    f:Hide()
+
+    -- Return the host to a safe native page rather than leaving all subframes
+    -- hidden behind our selected custom tab.
+    local inspect=getglobal("InspectFrame")
+    if inspect then
+      -- Never manually execute another frame's OnClick script in 1.12.
+      -- The global `this` would still be nativeOpenDriver, which can corrupt
+      -- assumptions inside Blizzard/custom UI tab handlers.
+      if HideUIPanel then HideUIPanel(inspect) else inspect:Hide() end
+    end
   end
 end
 
@@ -2312,15 +2569,26 @@ local function startNativeOpenDriver()
 end
 
 local function inspectTarget()
-  openTargetTalents()
+  local name=(UnitExists("target") and UnitIsPlayer("target")) and UnitName("target") or nil
+  if not name then
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r target another player to inspect talents.")
+    return nil
+  end
+
+  -- SLASHSAFE1/public-entry safety: never directly enter legacy InspectFrame
+  -- from slash/macro/public helper callbacks. Route through the same one-shot
+  -- deferred queue used by the UnitPopup path.
+  if TI.QueueSafeOpen then
+    return TI.QueueSafeOpen(name)
+  end
+
+  return nil
 end
 
 local eventFrame=CreateFrame("Frame")
 eventFrame:RegisterEvent("CHAT_MSG_ADDON")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("ADDON_LOADED")
-eventFrame:RegisterEvent("CHARACTER_POINTS_CHANGED")
-eventFrame:RegisterEvent("SPELLS_CHANGED")
 eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 eventFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
 eventFrame:SetScript("OnEvent", function()
@@ -2343,35 +2611,31 @@ eventFrame:SetScript("OnEvent", function()
     return
   end
   if event=="PLAYER_TARGET_CHANGED" then
-    -- One-shot ownership refresh only while TalentInspect owns InspectFrame.
+    if TI.CancelPopupOpen then TI.CancelPopupOpen() end
+    if TI.CancelNativeTabEmbed then TI.CancelNativeTabEmbed() end
+
+    -- TARGETSAFE1:
+    -- A target change is now an ownership boundary, NEVER an implicit request
+    -- to inspect the new player. Right-clicking another nameplate can itself
+    -- fire PLAYER_TARGET_CHANGED before the popup Talents item is clicked.
+    -- The old auto-open behavior could therefore race:
+    --
+    --   target changes A -> B
+    --   PLAYER_TARGET_CHANGED auto-opens B
+    --   popup Talents queues another B open
+    --   cached/provisional/sync render paths all touch the same reusable frame
+    --
+    -- Under rapid Hunter/Mage/Shaman stress switching this visibly looked like
+    -- class backgrounds fighting each other.
+    --
+    -- Close/reset the old inspect ownership here. The NEW player is opened only
+    -- by an explicit Talents click (or explicit /ti command).
     if TI.embeddedPrefix=="InspectFrame" and f:IsShown() then
-      local newName=(UnitExists("target") and UnitIsPlayer("target")) and UnitName("target") or nil
-
-      if not newName or newName==UnitName("player") or not targetCanBeInspectedSafely() then
-        closeInvalidInspectTarget()
-        return
-      end
-
-      if newName~=TI.currentName then
-        resetInspectTalentView(newName)
-        -- openTargetTalents() performs the single guarded InspectUnit call.
-        openTargetTalents()
-      end
+      closeInvalidInspectTarget()
     end
     return
   end
 
-  if event=="CHARACTER_POINTS_CHANGED" or event=="SPELLS_CHANGED" then
-    local me=UnitName("player")
-    if me then
-      local fresh=captureLocal()
-      cacheData(fresh)
-      if TI.currentName==me and f:IsShown() then
-        showData(fresh,"Local talents updated")
-      end
-    end
-    return
-  end
   if event~="CHAT_MSG_ADDON" or arg1~=TI.PREFIX then return end
   local msg, channel, sender=arg2,arg3,arg4
   local a=split(msg,"^")
@@ -2390,23 +2654,7 @@ eventFrame:SetScript("OnEvent", function()
   end
 
   if cmd=="DESC" then
-    local recipient=unsafe(a[2])
-    if recipient~=me then return end
-    local page=tonumber(a[3])
-    local index=tonumber(a[4])
-    local part=tonumber(a[5]) or 1
-    local total=tonumber(a[6]) or 1
-    local key=tostring(sender or "")..":"..tostring(page)..":"..tostring(index)
-    descParts[key]=descParts[key] or {total=total,parts={}}
-    descParts[key].parts[part]=a[7] or ""
-    local ready=1
-    for p=1,total do if not descParts[key].parts[p] then ready=nil break end end
-    if ready then
-      local joined=""
-      for p=1,total do joined=joined..descParts[key].parts[p] end
-      descParts[key]=nil
-      cacheDescription(sender,page,index,unescapeTooltipText(joined))
-    end
+    -- Legacy direct-description transport is retired; allocate nothing.
     return
   end
 
@@ -2418,7 +2666,12 @@ eventFrame:SetScript("OnEvent", function()
     TI.syncDiag.lastReqSender=sender
     TI.syncDiag.lastReqChannel=channel
     if wanted==me and requester and requester~="" then
-      sendLocalTo(requester,channel)
+      local now=nowSeconds()
+      local last=TI.lastServedRequest[requester] or -100
+      if (now-last)>=1.0 then
+        TI.lastServedRequest[requester]=now
+        sendLocalTo(requester,channel)
+      end
     end
     return
   end
@@ -2445,13 +2698,22 @@ eventFrame:SetScript("OnEvent", function()
     if TalentInspectData_NormalizeClass then classToken=TalentInspectData_NormalizeClass(classToken) end
     -- Same rule: LREQ already arrived over a valid PARTY/RAID/GUILD channel.
     -- Never rediscover transport from target state.
-    if channel then sendLearnedClass(sender,channel,classToken,receiverFP) end
+    if channel then
+      local now=nowSeconds()
+      local key=tostring(sender or "")..":"..tostring(classToken or "")
+      local last=TI.lastServedLearnRequest[key] or -100
+      if (now-last)>=1.0 then
+        TI.lastServedLearnRequest[key]=now
+        sendLearnedClass(sender,channel,classToken,receiverFP)
+      end
+    end
     return
   elseif cmd=="LBEGIN" then
+    pruneTransientSyncState()
     local classToken=unsafe(a[3]); local fp=unsafe(a[4])
     if TalentInspectData_NormalizeClass then classToken=TalentInspectData_NormalizeClass(classToken) end
     if TalentInspectHelper and TalentInspectHelper:BeginPeerClass(classToken) then
-      TI.learnPending[classToken]={sender=sender,fingerprint=fp,count=0}
+      TI.learnPending[classToken]={sender=sender,fingerprint=fp,count=0,startedAt=nowSeconds()}
       TI.lastLearnSync[classToken]={state="receiving",sender=sender,fingerprint=fp,count=0}
     end
     return
@@ -2477,7 +2739,7 @@ eventFrame:SetScript("OnEvent", function()
 
     local key=classToken..":"..treeIndex..":"..index
     local d=TI.learnDescParts[key]
-    if not d then d={total=total,parts={}}; TI.learnDescParts[key]=d end
+    if not d then d={total=total,parts={},startedAt=nowSeconds()}; TI.learnDescParts[key]=d end
     if d.total~=total then TI.learnDescParts[key]=nil; return end
     d.parts[part]=a[8] or ""
 
@@ -2511,6 +2773,7 @@ eventFrame:SetScript("OnEvent", function()
   end
 
   if cmd=="BEGIN" then
+    pruneTransientSyncState()
     TI.syncDiag=TI.syncDiag or {}
     TI.syncDiag.lastBeginSender=sender
     TI.syncDiag.lastBeginChannel=channel
@@ -2522,9 +2785,9 @@ eventFrame:SetScript("OnEvent", function()
     end
 
     local expectedClass=TI.syncExpectedClass or currentTargetClassToken()
-    if incomingName==TI.syncExpectedName and
+    if not s or incomingName~=TI.syncExpectedName or sender~=incomingName or
        not classesAgree(incomingClass,expectedClass) then
-      TI.pending[s]=nil
+      if s then TI.pending[s]=nil end
       return
     end
 
@@ -2537,10 +2800,11 @@ eventFrame:SetScript("OnEvent", function()
       stopFallbackTimer()
       hideNoSyncMessages()
     end
-    TI.pending[s]={name=incomingName,class=incomingClass,level=tonumber(a[6]) or 0,tabs={},sender=sender}
+    TI.pending[s]={name=incomingName,class=incomingClass,level=tonumber(a[6]) or 0,tabs={},sender=sender,
+      startedAt=nowSeconds(),renderGeneration=TI.renderGeneration}
   elseif cmd=="TAB" then
-    local d=TI.pending[a[3]]; if not d then return end
-    local p=tonumber(a[4]); if not p then return end
+    local d=TI.pending[a[3]]; if not d or d.sender~=sender then return end
+    local p=tonumber(a[4]); if not p or p<1 or p>3 then return end
     local remoteFileName=unsafe(a[8])
     d.tabs[p]={
       name=unsafe(a[5]),
@@ -2550,14 +2814,15 @@ eventFrame:SetScript("OnEvent", function()
       talents={}
     }
   elseif cmd=="TAL" then
-    local d=TI.pending[a[3]]; if not d then return end
-    local p=tonumber(a[4]); local i=tonumber(a[5]); if not d.tabs[p] then return end
+    local d=TI.pending[a[3]]; if not d or d.sender~=sender then return end
+    local p=tonumber(a[4]); local i=tonumber(a[5])
+    if not p or p<1 or p>3 or not i or i<1 or i>80 or not d.tabs[p] then return end
     d.tabs[p].talents[i]={index=i,name=unsafe(a[6]),icon=unsafe(a[7]),tier=tonumber(a[8]) or 1,col=tonumber(a[9]) or 1,
       rank=tonumber(a[10]) or 0,maxRank=tonumber(a[11]) or 1,
       preTier=tonumber(a[12]) or 0,preCol=tonumber(a[13]) or 0,
       prereqScanned=tonumber(a[14]) or 0}
   elseif cmd=="END" then
-    local d=TI.pending[a[3]]; if not d then return end
+    local d=TI.pending[a[3]]; if not d or d.sender~=sender then return end
     TI.pending[a[3]]=nil
 
     if d.name==TI.syncExpectedName and
@@ -2601,9 +2866,11 @@ eventFrame:SetScript("OnEvent", function()
     -- FR1c ownership guard: a late packet from Player A must never replace
     -- Player B after the InspectFrame target has changed.
     if TI.embeddedPrefix=="InspectFrame" and
-       TI.currentName==d.name and sender==d.name then
+       TI.currentName==d.name and TI.renderOwner==d.name and
+       d.renderGeneration==TI.renderGeneration and sender==d.name then
       TI.selectedTab=rhs.selectedTab or best
       showData(d,"Synced")
+      showSyncSuccessStatus()
     end
   end
 end)
@@ -2613,104 +2880,158 @@ SLASH_TALENTINSPECT1="/ti"
 SLASH_TALENTINSPECT2="/talentinspect"
 SlashCmdList["TALENTINSPECT"]=function(msg)
   msg=string.lower(msg or "")
-  if msg=="prereqs" then
-    local n=0
-    for _,c in pairs(TI.connectors or {}) do
-      if c.minDown and c.maxDown then n=n+1 end
-    end
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r rendered prerequisite links="..n..
-      " on tree "..tostring(TI.selectedTab or "?")..".")
+
+  -- CMDLEAN1 public command surface:
+  -- No command is allowed to tear down active UI/runtime state.
+  if msg=="" then
+    -- SLASHSAFE1: /ti is now just another safe deferred-open entry point.
+    -- No InspectUnit/ShowUIPanel/render/reset work runs inside the slash handler.
+    inspectTarget()
     return
   end
-  if msg=="self" then
-    openSelfTalents()
-  elseif msg=="refresh" and TI.currentName then
-    if TI.currentName==UnitName("player") then
-      local d=captureLocal(); cacheData(d); showData(d,"Local talents updated")
-    else
-      request(TI.currentName)
+
+  if msg=="refresh" then
+    if not UnitExists("target") or not UnitIsPlayer("target") then
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r refresh skipped: target a nearby inspectable player.")
+      return
     end
-  elseif msg=="clearcache" or msg=="purge" then
-    clearTalentCache()
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r cached inspected talents cleared. Your UI/settings were kept.")
-  elseif msg=="cache" then
+
+    local targetName=UnitName("target")
+    if not targetName or targetName=="" then
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r refresh skipped: no valid target.")
+      return
+    end
+
+    if TI.QueueSafeOpen then
+      TI.QueueSafeOpen(targetName,1)
+    end
+    return
+  end
+
+  if msg=="cache" then
     local n=0
     for _ in pairs(TalentInspectDB.cache or {}) do n=n+1 end
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r "..n.." cached player talent build(s).")
-  elseif msg=="learntalent" then
-    local b=TI.hoveredTalentButton
-    if not b or not b.data then
-      DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r hover a talent first, then run /ti learntalent.")
-    else
-      local live=b.data
-      local d=TI.currentData
-      local page=b.page or TI.selectedTab or 1
-      local classToken=b.classToken or (d and d.class)
-      local pos=nil
-      if live.tier and live.col then pos=string.char(96+live.tier)..tostring(live.col) end
-      local st=TalentInspectData_FindTalent and TalentInspectData_FindTalent(classToken,page,live.name,pos,live.index)
-      DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect learned talent:|r "..tostring(live.name)..
-        " source="..tostring(st and st.source or "static")..
-        " learned="..tostring(st and st.learned or 0)..
-        " descRank="..tostring(st and st.descRank or "nil")..
-        " hasDesc="..tostring(st and st.desc and st.desc~="" and "yes" or "no")..
-        " resolved="..tostring(st and TalentInspectData_GetDescription and select(2,TalentInspectData_GetDescription(st,(live.rank or 0)>0 and live.rank or 1)) or "none"))
-    end
-  elseif msg=="learnsync" then
-    local parts={}
-    if TalentInspectDB and TalentInspectDB.learned then
-      for classToken,d in pairs(TalentInspectDB.learned) do
-        local fp=(TalentInspectHelper and TalentInspectHelper:GetFingerprint(classToken)) or "?"
-        table.insert(parts,classToken.."="..fp.." ("..tostring(d.source or "?")..")")
+    return
+  end
+
+  if msg=="clearcache" then
+    clearTalentCache()
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r saved inspected-player cache cleared safely. The currently open talent tree was left untouched.")
+    return
+  end
+
+  if msg=="help" then
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect|r  /ti  /ti refresh  /ti cache  /ti clearcache  /ti help")
+    return
+  end
+
+  -- Unknown/retired commands must NEVER fall through into opening or rebuilding
+  -- the Inspect UI. That old behavior made typos capable of changing runtime state.
+  DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r unknown or retired command. Use /ti help.")
+end
+
+
+-- OPENSAFE1: deferred one-shot UnitPopup open --------------------------------
+local popupOpenDriver=CreateFrame("Frame")
+local popupOpenPending=nil
+local popupOpenElapsed=0
+local popupOpenBusy=nil
+
+local function cancelPopupOpen()
+  popupOpenPending=nil
+  popupOpenElapsed=0
+  popupOpenBusy=nil
+  popupOpenDriver:SetScript("OnUpdate",nil)
+  popupOpenDriver:Hide()
+end
+TI.CancelPopupOpen=cancelPopupOpen
+
+local function queuePopupOpen(name,forceRefresh)
+  if not name or name=="" then return nil end
+  if popupOpenPending or popupOpenBusy then return nil end
+
+  popupOpenPending={name=name,forceRefresh=forceRefresh and 1 or nil}
+  popupOpenElapsed=0
+  popupOpenDriver:Show()
+  popupOpenDriver:SetScript("OnUpdate",function()
+    popupOpenElapsed=popupOpenElapsed+(arg1 or 0)
+    if popupOpenElapsed<0.05 then return end
+
+    -- One-shot: detach BEFORE any talent/InspectFrame work.
+    this:SetScript("OnUpdate",nil)
+    this:Hide()
+
+    local pending=popupOpenPending
+    popupOpenPending=nil
+    popupOpenElapsed=0
+    popupOpenBusy=1
+
+    if pending and UnitExists("target") and UnitIsPlayer("target") and
+       UnitName("target")==pending.name then
+
+      if pending.name==UnitName("player") then
+        -- Self view is also deferred so slash/public callbacks remain trivial.
+        openSelfTalents()
+      elseif targetCanBeInspectedSafely and targetCanBeInspectedSafely() then
+        -- Refresh no longer resets UI synchronously. request() already sends a
+        -- fresh sync request even when a valid cache exists, so the same safe
+        -- open transaction is sufficient.
+        openTargetTalents()
       end
     end
-    if table.getn(parts)==0 then
-      DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r no learned class snapshots stored.")
-    else
-      DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect learned:|r "..table.concat(parts,", "))
-    end
-    for classToken,s in pairs(TI.lastLearnSync or {}) do
-      DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect sync:|r "..classToken..
-        " state="..tostring(s.state).." sender="..tostring(s.sender)..
-        " talents="..tostring(s.count or 0))
-    end
-  elseif msg=="syncdebug" then
-    local name=TI.currentName or (UnitExists("target") and UnitName("target")) or "nil"
-    local channel=(name~="nil") and transportFor(name) or nil
-    local key=normalizePlayerName(name)
-    local d=TI.syncDiag or {}
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect syncdebug:|r target="..tostring(name)..
-      " transport="..tostring(channel or "NONE")..
-      " guildPeer="..tostring(key and TI.guildPeers[key] and 1 or 0)..
-      " roster="..tostring(key and TI.guildRosterNames[key] and 1 or 0))
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect syncdebug:|r lastRequest="..
-      tostring(d.lastRequestName or "nil").." via "..tostring(d.lastRequestChannel or "nil")..
-      " lastREQseen="..tostring(d.lastReqSeen or "nil")..
-      " from="..tostring(d.lastReqSender or "nil")..
-      " via="..tostring(d.lastReqChannel or "nil")..
-      " beginFrom="..tostring(d.lastBeginSender or "nil")..
-      " beginVia="..tostring(d.lastBeginChannel or "nil"))
-  elseif msg=="synctime" then
-    local name=TI.currentName
-    local t=name and TI.syncTiming[name]
-    if t then
-      local rb=t.requestToBegin
-      local rc=t.requestToComplete
-      local bc=t.beginToComplete
-      DEFAULT_CHAT_FRAME:AddMessage(string.format("|cff33ff99TalentInspect:|r %s sync: request->begin %s, request->complete %s, begin->complete %s",
-        name,
-        rb and string.format("%.3fs",rb) or "pending",
-        rc and string.format("%.3fs",rc) or "pending",
-        bc and string.format("%.3fs",bc) or "pending"))
-    else
-      DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r no completed sync timing for the current inspected player.")
-    end
-  elseif msg=="help" then
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect|r  /ti  /ti refresh  /ti cache  /ti learntalent  /ti learnsync  /ti syncdebug  /ti synctime  /ti clearcache")
-  else
-    openTargetTalents()
-  end
+
+    popupOpenBusy=nil
+  end)
+  return 1
 end
+
+-- Runtime indirection lets slash/public helpers defined earlier in the file
+-- use the exact same safe queue after addon initialization completes.
+TI.QueueSafeOpen=queuePopupOpen
+
+-- DEEPHARDEN1: deferred one-shot native Inspect Talents-tab embed.
+local nativeTabEmbedDriver=CreateFrame("Frame")
+local nativeTabEmbedPending=nil
+local nativeTabEmbedElapsed=0
+
+local function cancelNativeTabEmbed()
+  nativeTabEmbedPending=nil
+  nativeTabEmbedElapsed=0
+  nativeTabEmbedDriver:SetScript("OnUpdate",nil)
+  nativeTabEmbedDriver:Hide()
+end
+
+local function queueSafeEmbed(host,prefix,name)
+  if not host or prefix~="InspectFrame" or not name or name=="" then return nil end
+  if nativeTabEmbedPending then return nil end
+
+  nativeTabEmbedPending={host=host,prefix=prefix,name=name}
+  nativeTabEmbedElapsed=0
+  nativeTabEmbedDriver:Show()
+  nativeTabEmbedDriver:SetScript("OnUpdate",function()
+    nativeTabEmbedElapsed=nativeTabEmbedElapsed+(arg1 or 0)
+    if nativeTabEmbedElapsed<0.05 then return end
+
+    this:SetScript("OnUpdate",nil)
+    this:Hide()
+
+    local p=nativeTabEmbedPending
+    nativeTabEmbedPending=nil
+    nativeTabEmbedElapsed=0
+
+    if not p or not p.host or not p.host:IsShown() then return end
+    if not UnitExists("target") or not UnitIsPlayer("target") then return end
+    if UnitName("target")~=p.name then return end
+    if not targetCanBeInspectedSafely or not targetCanBeInspectedSafely() then return end
+
+    showEmbeddedTalents(p.host,p.prefix)
+  end)
+  return 1
+end
+
+TI.QueueSafeEmbed=queueSafeEmbed
+TI.CancelNativeTabEmbed=cancelNativeTabEmbed
 
 -- Blizzard player right-click menu ------------------------------------------
 local POP="VPTI_INSPECT_TALENTS"
@@ -2794,8 +3115,9 @@ if UnitPopupButtons and UnitPopupMenus then
           return
         end
 
-        -- The intended workflow is nearby player -> right-click -> Talents.
-        openTargetTalents()
+        -- OPENSAFE1: no legacy InspectFrame work inside UnitPopup_OnClick.
+        -- Queue one target, close menu, return immediately.
+        queuePopupOpen(name)
         CloseDropDownMenus()
         return
       end
@@ -2811,4 +3133,7 @@ TalentInspect.Request = request
 TalentInspect.ShowSelf = openSelfTalents
 TalentInspect.InstallNativeTabs = installNativeTabs
 TalentInspect.OpenSelfTalents = openSelfTalents
-TalentInspect.OpenTargetTalents = openTargetTalents
+
+-- SLASHSAFE1: public target-open helper is safe/deferred too. Keep the raw
+-- legacy open transaction private to this file.
+TalentInspect.OpenTargetTalents = inspectTarget
