@@ -4,6 +4,9 @@ TalentInspect adds inspectable VanillaPlus talent trees to World of Warcraft 1.1
 
 ## Features
 
+<img width="657" height="732" alt="TalentInspect" src="https://github.com/user-attachments/assets/07a965fa-b8b8-40b4-845d-905cdb90b8da" />
+
+
 - Inspect another player's VanillaPlus talent trees through the Character/Inspect UI.
 - Blizzard-style and pfUI-compatible presentation.
 - Live talent synchronization between TalentInspect users through supported group and guild addon channels.
