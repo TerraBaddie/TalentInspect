@@ -1644,7 +1644,7 @@ end
 
 local function showBlankLoadedStatus(noTransport)
   showNoSyncMessages(
-    noTransport and "Target not in party, raid, guild" or nil,
+    noTransport and "Target NOT in party, raid, guild" or nil,
     "No Sync Data Blank Loaded",
     "blank"
   )
@@ -1685,7 +1685,7 @@ local function showZeroTalentFallback(name,classToken,leftText,rightText)
   -- Explicitly render tree 1 after the static zero data is bound. The other
   -- two tree tabs remain live and switch to their own complete zero-rank trees.
   selectTab(1)
-  showBlankLoadedStatus(leftText=="Target not in party, raid, guild")
+  showBlankLoadedStatus(leftText=="Target NOT in party, raid, guild")
   return 1
 end
 
@@ -1696,8 +1696,8 @@ local function startFallbackTimer(name,classToken,leftText,rightText)
   TI.fallbackGeneration=TI.renderGeneration
   TI.fallbackElapsed=0
 
-  if leftText=="Target not in party, raid, guild" then
-    showNoSyncMessages("Target not in party, raid, guild",nil,nil)
+  if leftText=="Target NOT in party, raid, guild" then
+    showNoSyncMessages("Target NOT in party, raid, guild",nil,nil)
   else
     hideNoSyncMessages()
   end
@@ -1749,7 +1749,7 @@ local function showNoTransport(name)
     if showZeroTalentFallback(
       name,
       classToken,
-      "Target not in party, raid, guild",
+      "Target NOT in party, raid, guild",
       nil
     ) then
       return
@@ -1760,7 +1760,7 @@ local function showNoTransport(name)
   -- not leave an ownerless black page alive.
   hideButtons()
   showBlankPane()
-  showNoSyncMessages("Target not in party, raid, guild",nil,nil)
+  showNoSyncMessages("Target NOT in party, raid, guild",nil,nil)
   f:Hide()
   closeInvalidInspectTarget()
 end
