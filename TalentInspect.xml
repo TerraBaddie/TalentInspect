@@ -108,10 +108,10 @@
         <Layers>
           <Layer level="OVERLAY">
             <FontString name="TalentInspectNoSyncLeft" inherits="GameFontHighlightSmall" text="Target not in party, raid, guild" hidden="true">
-              <Color r="1" g="1" b="1"/>
+              <Color r="1" g="0.15" b="0.15"/>
             </FontString>
-            <FontString name="TalentInspectNoSyncRight" inherits="GameFontHighlightSmall" text="No TalentInspect Sync Data" hidden="true">
-              <Color r="1" g="1" b="1"/>
+            <FontString name="TalentInspectNoSyncRight" inherits="GameFontHighlightSmall" text="No Sync Data Blank Loaded" hidden="true">
+              <Color r="0.70" g="0.70" b="0.70"/>
             </FontString>
           </Layer>
         </Layers>
@@ -184,6 +184,7 @@
         </ScrollChild>
       </ScrollFrame>
 
+      <!-- Emergency fail-closed placeholder only. Normal inspect flow never shows this. -->
       <Frame name="TalentInspectBlankPane" enableMouse="false" hidden="true">
         <Anchors>
           <Anchor point="TOPLEFT" relativeTo="TalentInspectTreeScroll" relativePoint="TOPLEFT"/>
