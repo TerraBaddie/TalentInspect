@@ -16,13 +16,16 @@
 TalentInspectHelper = TalentInspectHelper or {}
 local H = TalentInspectHelper
 
-H.VERSION = "1.0.3-GUARD2"
+H.VERSION = "1.1.6-DEEPHARDEN1"
 H.scanScheduled = nil
 H.scanDelay = 0
 H.scanReason = nil
 H.lastScanAt = nil
 H.lastScanClass = nil
 H.lastScanCount = 0
+H.scanDirty = 1
+H.peerReadySession = nil
+H.peerStaging = H.peerStaging or {}
 
 TalentInspectData_Learned = TalentInspectData_Learned or {}
 
@@ -205,18 +208,26 @@ function H:ScanCurrentClass(reason,includeDescriptions)
           scannedAt=classData.scannedAt
         }
 
-        if includeDescriptions then
+        local oldTree=oldLearned and oldLearned.trees and oldLearned.trees[tab]
+        local oldRec=oldTree and oldTree.byName and oldTree.byName[name]
+        local structuralChanged=nil
+        if not oldRec or oldRec.maxRank~=(maxRank or 0) or
+           oldRec.tier~=(tier or 0) or oldRec.col~=(col or 0) then
+          structuralChanged=1
+        end
+        local rankChanged=oldRec and oldRec.rank~=(rank or 0)
+        local missingExact=nil
+        if (rank or 0)>0 then
+          missingExact=(not oldRec or not oldRec.desc or oldRec.desc=="" or
+                        tonumber(oldRec.descRank)~=(rank or 0))
+        elseif not oldRec or not oldRec.desc or oldRec.desc=="" then
+          missingExact=1
+        end
+        if includeDescriptions and (structuralChanged or rankChanged or missingExact) then
           rec.desc=tooltipDescription(tab,index)
-        else
-          -- SAFE132: automatic login scan is structural only. Preserve a prior
-          -- exact-name learned description instead of repeatedly calling the
-          -- legacy hidden GameTooltip:SetTalent path during startup.
-          local oldTree=oldLearned and oldLearned.trees and oldLearned.trees[tab]
-          local oldRec=oldTree and oldTree.byName and oldTree.byName[name]
-          if oldRec and oldRec.desc and oldRec.desc~="" then
-            rec.desc=oldRec.desc
-            rec.descRank=oldRec.descRank or rec.descRank
-          end
+        elseif oldRec and oldRec.desc and oldRec.desc~="" then
+          rec.desc=oldRec.desc
+          rec.descRank=oldRec.descRank or rec.descRank
         end
 
         tree.talents[index]=rec
@@ -235,6 +246,8 @@ function H:ScanCurrentClass(reason,includeDescriptions)
   H.lastScanCount=total
   H.lastScanReason=reason or "manual"
   H.lastScanDescriptions=includeDescriptions and 1 or 0
+  H.scanDirty=nil
+  if includeDescriptions then H.peerReadySession=1 end
   return total
 end
 
@@ -280,26 +293,15 @@ events:SetScript("OnEvent",function()
     -- FR4j: give VanillaPlus/custom-client talent APIs and tooltip text extra time
     -- to settle before the single bounded login scan. This avoids capturing
     -- stale early-login talent descriptions.
+    H.scanDirty=1
     schedule(20.00,"login-delayed",nil)
   elseif event=="CHARACTER_POINTS_CHANGED" then
-    -- Coalesce rapid changes; player-initiated talent changes are a safe point
-    -- to refresh the live tooltip description for the current class.
-    schedule(0.75,"talent-change",1)
+    -- Coalesce point clicks into one differential scan.
+    H.scanDirty=1
+    schedule(0.90,"talent-change-coalesced",1)
   end
 end)
 
-SLASH_TALENTINSPECTLEARN1="/tilearn"
-SlashCmdList["TALENTINSPECTLEARN"]=function(msg)
-  msg=string.lower(msg or "")
-  if msg=="scan" or msg=="" then
-    local n=H:ScanCurrentClass("manual",1)
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r live talent scan learned "..(n or 0).." current-class talents.")
-  elseif msg=="status" then
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r learned class="..tostring(H.lastScanClass)..
-      " talents="..tostring(H.lastScanCount).." reason="..tostring(H.lastScanReason)..
-      " descriptions="..tostring(H.lastScanDescriptions or 0))
-  end
-end
 
 
 -- FR4a: on-demand peer learned-data exchange -------------------------------
@@ -347,6 +349,15 @@ local function learnedFingerprint(d)
   return tostring(count).."-"..tostring(sum)
 end
 
+function H:EnsureFreshForPeerSync()
+  local c=playerClass()
+  local d=TalentInspectData_Learned and TalentInspectData_Learned[c]
+  if not d or H.scanDirty or not H.peerReadySession then
+    H:ScanCurrentClass("peer-sync-differential-refresh",1)
+  end
+  return H:GetOwnLearnedClass()
+end
+
 function H:GetOwnLearnedClass()
   local c=playerClass()
   local d=TalentInspectData_Learned and TalentInspectData_Learned[c]
@@ -379,41 +390,41 @@ end
 
 function H:BeginPeerClass(classToken)
   classToken=normClass(classToken)
-  if classToken==playerClass() then return nil end -- own live scan always wins
-  local db=ensureDB()
-  db[classToken]={class=classToken,source="peer-learned",scannedAt=time and time() or 0,trees={}}
-  TalentInspectData_Learned[classToken]=db[classToken]
+  if classToken==playerClass() then return nil end
+  H.peerStaging[classToken]={class=classToken,source="peer-learned",
+    scannedAt=time and time() or 0,trees={}}
   return 1
+end
+
+function H:AbortPeerClass(classToken)
+  classToken=normClass(classToken)
+  H.peerStaging[classToken]=nil
 end
 
 function H:AcceptPeerTalent(classToken,treeIndex,payload)
   classToken=normClass(classToken)
   if classToken==playerClass() then return nil end
-
-  local f={}
-  local start=1
+  treeIndex=tonumber(treeIndex)
+  if not treeIndex or treeIndex<1 or treeIndex>3 then return nil end
+  local f={}; local start=1
   while 1 do
     local p=string.find(payload or "","~",start,1)
     if not p then table.insert(f,string.sub(payload or "",start)); break end
     table.insert(f,string.sub(payload,start,p-1)); start=p+1
   end
-
   local index=tonumber(f[1]); local name=peerUnsafe(f[2])
   local tier=tonumber(f[4]); local col=tonumber(f[5])
-  if not index or not name or name=="" or not tier or not col then return nil end
+  if not index or index<1 or index>80 or not name or name=="" or not tier or not col then return nil end
   if tier<1 or tier>7 or col<1 or col>4 then return nil end
-
-  local db=ensureDB(); local d=db[classToken]
-  if not d or d.source~="peer-learned" then return nil end
+  local d=H.peerStaging[classToken]
+  if not d then return nil end
   local tree=d.trees[treeIndex]
   if not tree then tree={talents={},byName={},byPos={}}; d.trees[treeIndex]=tree end
-
   local rec={learned=1,source="peer-learned",index=index,sourceName=name,name=name,
     icon=peerUnsafe(f[3]),tier=tier,col=col,pos=makePos(tier,col),rank=0,
     maxRank=tonumber(f[6]) or 0,preTier=tonumber(f[7]),preCol=tonumber(f[8]),
     preRank=tonumber(f[9]),descRank=tonumber(f[10]) or 1,
-    prereqScanned=tonumber(f[11]) or 0,
-    desc=nil,scannedAt=time and time() or 0}
+    prereqScanned=tonumber(f[11]) or 0,desc=nil,scannedAt=time and time() or 0}
   tree.talents[index]=rec; tree.byName[name]=rec
   if rec.pos then tree.byPos[rec.pos]=rec end
   return 1
@@ -422,7 +433,9 @@ end
 function H:ApplyPeerDescription(classToken,treeIndex,index,encoded)
   classToken=normClass(classToken)
   if classToken==playerClass() then return nil end
-  local d=TalentInspectData_Learned and TalentInspectData_Learned[classToken]
+  treeIndex=tonumber(treeIndex); index=tonumber(index)
+  if not treeIndex or treeIndex<1 or treeIndex>3 or not index or index<1 or index>80 then return nil end
+  local d=H.peerStaging[classToken]
   local tree=d and d.trees and d.trees[treeIndex]
   local t=tree and tree.talents and tree.talents[index]
   if not t then return nil end
@@ -432,13 +445,14 @@ end
 
 function H:FinalizePeerClass(classToken,expected)
   classToken=normClass(classToken)
-  local d=TalentInspectData_Learned and TalentInspectData_Learned[classToken]
+  local d=H.peerStaging[classToken]
   if not d then return nil end
   local got=learnedFingerprint(d)
-  if got~=expected then
-    local db=ensureDB(); db[classToken]=nil; TalentInspectData_Learned[classToken]=nil
-    return nil
-  end
+  if got~=expected then H.peerStaging[classToken]=nil; return nil end
   d.fingerprint=got; d.receivedAt=time and time() or 0
+  local db=ensureDB()
+  db[classToken]=d
+  TalentInspectData_Learned[classToken]=d
+  H.peerStaging[classToken]=nil
   return 1
 end
