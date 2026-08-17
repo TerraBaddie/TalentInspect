@@ -1619,7 +1619,7 @@ local function showNoSyncMessages(leftText,rightText,rightState)
 
   if leftText and leftText~="" then
     f.noSyncLeft:SetText(leftText)
-    if leftText=="Target not in party, raid, guild" then
+    if leftText=="Target NOT in party, raid, guild" then
       f.noSyncLeft:SetTextColor(1,0.15,0.15)
     else
       f.noSyncLeft:SetTextColor(0.70,0.70,0.70)
