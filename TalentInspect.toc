@@ -1,8 +1,8 @@
 ## Interface: 11200
 ## Title: TalentInspect
-## Notes: Inspect & learn VanillaPlus talent builds in WoW 1.12.1 both clients need this addon for it to work 100%!
+## Notes: Inspectable VanillaPlus talent trees for WoW 1.12.1.
 ## Author: OpenAI + TerraBaddie
-## Version: 1.0.0
+## Version: 1.1.0
 ## SavedVariables: TalentInspectDB
 
 TalentData.lua
