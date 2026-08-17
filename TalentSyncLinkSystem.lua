@@ -11,7 +11,7 @@
 
 TalentSyncLinkSystem = TalentSyncLinkSystem or {}
 local L = TalentSyncLinkSystem
-L.VERSION = "1.0.3-GUARD2"
+L.VERSION = "1.1.6-DEEPHARDEN1"
 L.LINKTYPE = "vptalent"
 
 local function normClass(c)
@@ -77,10 +77,9 @@ function L:BuildLink(button)
 
   -- User-requested behavior: an unlearned talent links its first rank.
   local linkedRank=actualRank
-  local color="|cff66ccff" -- light blue
+  local color="|cff66ccff" -- always light blue
   if linkedRank<=0 then
-    linkedRank=1
-    color="|cff808080" -- grey = not currently learned
+    linkedRank=1 -- unlearned talent links Rank 1 / maxRank
   end
   if linkedRank>maxRank then linkedRank=maxRank end
 
@@ -200,10 +199,9 @@ function L:BuildNativeTalentLink(tab,index)
   rank=tonumber(rank) or 0
 
   local linkedRank=rank
-  local color="|cff66ccff"
+  local color="|cff66ccff" -- always light blue
   if linkedRank<=0 then
-    linkedRank=1
-    color="|cff808080"
+    linkedRank=1 -- unlearned talent links Rank 1 / maxRank
   end
   if linkedRank>maxRank then linkedRank=maxRank end
 
@@ -280,7 +278,9 @@ nativeHookEvents:RegisterEvent("ADDON_LOADED")
 nativeHookEvents:RegisterEvent("PLAYER_LOGIN")
 nativeHookEvents:SetScript("OnEvent",function()
   if event=="ADDON_LOADED" then
-    if arg1=="Blizzard_TalentUI" or TalentFrame then
+    -- DEEPHARDEN1: do not rescan 160 possible talent-button globals every time
+    -- ANY addon loads merely because TalentFrame already exists.
+    if arg1=="Blizzard_TalentUI" then
       L:InstallNativeTalentHooks()
     end
   elseif event=="PLAYER_LOGIN" then
