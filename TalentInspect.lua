@@ -1,4 +1,4 @@
--- TalentInspect v1.0.0 FR4a - WoW 1.12.1 / VanillaPlus
+-- TalentInspect v1.3.0 - WoW 1.12.1 / VanillaPlus
 -- Request-driven talent sync with Blizzard-style one-tree-per-page UI.
 
 TalentInspectDB = TalentInspectDB or {}
@@ -6,7 +6,7 @@ TalentInspectDB.cache = TalentInspectDB.cache or {}
 TalentInspectDB.cacheSchema = TalentInspectDB.cacheSchema or 1
 
 local TI = {}
-TI.VERSION = "1.1.0"
+TI.VERSION = "1.3.0"
 TI.PREFIX = "VPTI1"
 TI.selectedTab = 1
 TI.currentName = nil
@@ -159,13 +159,16 @@ local function buildZeroTalentData(name,classToken,level)
         local preTier=nil
         local preCol=nil
         local preRank=nil
+        local prereqName=nil
         local prereqScanned=nil
 
-        -- Learned prerequisite authority overlays only the matching talent.
+        -- LIVEPREREQ2: learned exact-name prerequisite authority overlays only
+        -- this exact talent identity. Empty string is authoritative NONE.
         if liveOverlay and liveOverlay.prereqScanned==1 then
           preTier=liveOverlay.preTier
           preCol=liveOverlay.preCol
           preRank=liveOverlay.preRank
+          prereqName=liveOverlay.prereqName or ""
           prereqScanned=1
         end
 
@@ -180,6 +183,7 @@ local function buildZeroTalentData(name,classToken,level)
           preTier=preTier or 0,
           preCol=preCol or 0,
           preRank=preRank,
+          prereqName=prereqName,
           prereqScanned=prereqScanned
         }
       end
@@ -192,6 +196,7 @@ local function buildZeroTalentData(name,classToken,level)
             if pre.name==st.prereq then
               tab.talents[idx].preTier=pre.tier or 0
               tab.talents[idx].preCol=pre.col or 0
+              tab.talents[idx].prereqName=st.prereq
               break
             end
           end
@@ -217,8 +222,26 @@ local GRID_X = 72
 local GRID_Y = 55
 local WHEEL_STEP = 20
 
+local function talentGridY(tier)
+  -- ROWSNAP2: every tier uses the exact same 55-unit spacing.
+  -- The old tier-7-only -4px exception made the final row impossible to
+  -- line up with the row above after a one-row snap.
+  return GRID_Y0+((tier or 1)-1)*GRID_Y
+end
+local WHEEL_STEP = 20
+
 local function usingPfUI()
   return pfUI and pfUI.api
+end
+
+-- BUIICON2:
+-- Blizzard default UI needs the talent grid 2px higher to stay clear of the
+-- exterior frame. pfUI keeps its existing position exactly.
+-- This is a uniform visual offset only; row spacing remains exactly 55px.
+local function talentDisplayY(tier)
+  local y=talentGridY(tier)
+  if not usingPfUI() then y=y-2 end
+  return y
 end
 
 local function wipeTable(t)
@@ -599,7 +622,10 @@ local function setEmbeddedMode(host)
     if f.blizzClose then f.blizzClose:Hide() end
   else
     if f.blizzChrome then f.blizzChrome:Show() end
-    if f.blizzHeader then f.blizzHeader:Show() end
+    -- HEADERCLEAN1: the selected-tree name/points already live in the three
+    -- persistent tree tabs.  Do not draw the old redundant Blizzard input-box
+    -- header behind a second copy of the same information.
+    if f.blizzHeader then f.blizzHeader:Hide() end
     if f.blizzClose then
       f.blizzClose:SetFrameLevel(f:GetFrameLevel()+220)
       f.blizzClose:Show()
@@ -609,16 +635,23 @@ local function setEmbeddedMode(host)
     -- FR2-XML5: restore stock InspectFrame close-button position.
     -- XML4 moved the whole red button when only the X artwork looked off.
     local hostClose=getglobal("InspectFrameCloseButton")
-    if hostClose and hostClose.Raise then hostClose:Raise() end
+    if hostClose then
+      -- CLOSEALIGN1: TalentInspect's Blizzard-default header sits slightly
+      -- inside the host chrome. Reuse the native close button and nudge it
+      -- into that socket; do not create/reparent/replace the button.
+      hostClose:ClearAllPoints()
+      hostClose:SetPoint("TOPRIGHT",host,"TOPRIGHT",-30,-8)
+      if hostClose.Raise then hostClose:Raise() end
+    end
   end
 
-  -- Compact header: selected tree centered; cache/sync state unobtrusive.
+  -- HEADERCLEAN1: remove the old selected-tree header completely in embedded
+  -- Character/Inspect mode.  The tree tabs already show name + points, so this
+  -- text was redundant in both Blizzard UI and pfUI.  Standalone fallback keeps
+  -- its legacy title behavior.
   f.treeTitle:ClearAllPoints()
-  if usingPfUI() then
-    f.treeTitle:SetPoint("TOP",f,"TOP",0,-2)
-  else
-    f.treeTitle:SetPoint("CENTER",f.blizzHeader,"CENTER",0,0)
-  end
+  f.treeTitle:SetText("")
+  f.treeTitle:Hide()
 
   f.status:ClearAllPoints()
   f.status:SetPoint("BOTTOMRIGHT",f,"BOTTOMRIGHT",-20,1)
@@ -628,12 +661,15 @@ local function setEmbeddedMode(host)
     f.noSyncRight:ClearAllPoints()
     if usingPfUI() then
       -- User mock-up: white status text on the open strip above the spec tabs.
-      f.noSyncLeft:SetPoint("TOPLEFT",f,"TOPLEFT",-1,32)
+      f.noSyncLeft:SetPoint("TOPLEFT",f,"TOPLEFT",64,22)
       f.noSyncRight:SetPoint("TOPLEFT",f,"TOPLEFT",-1,-3)
     else
-      -- Conservative Blizzard placement until a final Blizzard mock-up is supplied.
-      f.noSyncLeft:SetPoint("TOPLEFT",f,"TOPLEFT",94,20)
-      f.noSyncRight:SetPoint("BOTTOMLEFT",f,"BOTTOMLEFT",16 ,48)
+      -- HEADERCLEAN3/TABDOWN1: keep the target/sync status inside the open
+      -- strip above the spec tabs.  The old +20 Y placed this text above the
+      -- embedded page and clipped it against Blizzard's top chrome.
+      -- SAFEUIBASE1: Blizzard-only top target-status anchor. pfUI uses the branch above.
+      f.noSyncLeft:SetPoint("TOPLEFT",f,"TOPLEFT",64,22)
+      f.noSyncRight:SetPoint("BOTTOMLEFT",f,"BOTTOMLEFT",16,48)
     end
   end
 
@@ -647,9 +683,12 @@ local function setEmbeddedMode(host)
           if usingPfUI() then
             b:SetPoint("BOTTOMLEFT",f.scroll,"TOPLEFT",0,4)
           else
-            -- Blizzard mode: lift the upward-facing tree tabs into the spare
-            -- header area above the artwork.
-            b:SetPoint("BOTTOMLEFT",f.scroll,"TOPLEFT",34,32)
+            -- HEADERCLEAN3/TABDOWN1: use only the lower Blizzard spec-tab row.
+            -- HEADERCLEAN2 left these 20px too high after the redundant header
+            -- was removed, crowding/clipping the target status line.  Keep the
+            -- same tabs and move their single anchor down 20px; do not create
+            -- or duplicate any tab buttons.
+            b:SetPoint("BOTTOMLEFT",f.scroll,"TOPLEFT",34,12)
           end
         else
           if usingPfUI() then
@@ -688,7 +727,10 @@ local function setEmbeddedMode(host)
     end
   end
 
-  -- Short fixed viewport. The full 7-row tree scrolls behind this window.
+  -- HEADERCLEAN2: keep the proven SNAPSCROLL2 viewport geometry in both UI
+  -- modes.  The redundant selected-tree header/box stays removed, but the
+  -- talent ScrollFrame (and therefore its stock up/down buttons/slider) does
+  -- NOT move.  This avoids the 20px upward jump seen in HEADERCLEAN1.
   if f.scroll then
     f.scroll:EnableMouse(1)
     f.scroll:EnableMouseWheel(1)
@@ -696,21 +738,62 @@ local function setEmbeddedMode(host)
     if usingPfUI() then
       f.scroll:SetPoint("TOPLEFT",f,"TOPLEFT",4,-48)
     else
-      f.scroll:SetPoint("TOPLEFT",f,"TOPLEFT",4,-50)
+      f.scroll:SetPoint("TOPLEFT",f,"TOPLEFT",4,-38)
     end
     f.scroll:SetWidth(TREE_VIEW_W)
     if usingPfUI() then
       f.scroll:SetHeight(TREE_VIEW_H)
     else
-      f.scroll:SetHeight(TREE_VIEW_H-28)
+      f.scroll:SetHeight(TREE_VIEW_H-11)
+    end
+
+    -- ROWSNAP1:
+    -- Keep the two legal scroll positions exactly ONE talent-row apart.
+    -- The old fixed 397px canvas produced different scroll ranges:
+    --   pfUI = 47px, Blizzard = 58px
+    -- while the actual talent row spacing is 55px (GRID_Y).
+    -- That made every icon land at a slightly different screen Y after
+    -- scrolling.  Size only the existing canvas so max scroll = GRID_Y.
+    -- No button re-anchoring, no background changes, no new frames.
+    if f.canvas then
+      f.canvas:SetHeight((f.scroll:GetHeight() or TREE_VIEW_H) + GRID_Y)
     end
   end
 
   if f.treeBackgroundClip and f.scroll then
     f.treeBackgroundClip:ClearAllPoints()
-    f.treeBackgroundClip:SetPoint("TOPLEFT",f.scroll,"TOPLEFT",0,0)
+    -- HFUI + SNAPSCROLL2/LAYOUT2: Blizzard keeps the proven +3px horizontal
+    -- correction. The artwork window also sits 3px lower inside the newly
+    -- expanded viewport; pfUI keeps the BACKGROUNDFIX1 position unchanged.
+    if usingPfUI() then
+      f.treeBackgroundClip:SetPoint("TOPLEFT",f.scroll,"TOPLEFT",0,0)
+    else
+      f.treeBackgroundClip:SetPoint("TOPLEFT",f.scroll,"TOPLEFT",3,-3)
+    end
     f.treeBackgroundClip:SetWidth(TREE_VIEW_W)
     f.treeBackgroundClip:SetHeight(f.scroll:GetHeight())
+
+    -- BACKGROUNDFIX1: crop the bottom 128px source tiles by resizing the
+    -- texture regions themselves.  This keeps all background artwork static
+    -- and avoids a second ScrollFrame / renderer state machine.
+    local bgBottom=(f.scroll:GetHeight() or TREE_VIEW_H)-256
+    if bgBottom < 0 then bgBottom=0 elseif bgBottom > 128 then bgBottom=128 end
+
+    -- BGEXT1 (Blizzard only): use 25px more of the EXISTING bottom artwork
+    -- tiles.  No new texture/frame/ScrollFrame and no OnUpdate/show-hide churn.
+    -- pfUI remains exactly on the proven BACKGROUNDFIX1 geometry.
+    if not usingPfUI() then
+      bgBottom=bgBottom+25
+      if bgBottom>128 then bgBottom=128 end
+    end
+
+    local bgFrac=bgBottom/128
+    if tiles and tiles[3] and tiles[4] then
+      tiles[3]:SetHeight(bgBottom)
+      tiles[4]:SetHeight(bgBottom)
+      tiles[3]:SetTexCoord(0,1,0,bgFrac)
+      tiles[4]:SetTexCoord(0,1,0,bgFrac)
+    end
 
     -- FR2-XML5 explicit layer stack.
     f.treeBackgroundClip:SetFrameLevel(f:GetFrameLevel()+10)
@@ -718,9 +801,7 @@ local function setEmbeddedMode(host)
     f.scroll:SetFrameLevel(f:GetFrameLevel()+30)
     if f.canvas then f.canvas:SetFrameLevel(f:GetFrameLevel()+31) end
 
-    f.treeBackgroundClip:SetVerticalScroll(0)
-    f.treeBackgroundClip:SetHorizontalScroll(0)
-  end
+          end
 
   if f.blankPane and f.scroll then
     f.blankPane:ClearAllPoints()
@@ -788,12 +869,9 @@ f.blankPaneBG = TalentInspectBlankPaneBG
 -- Make sure custom 1.12 clients preserve the intended scroll-child ownership.
 f.scroll:SetScrollChild(f.canvas)
 f.canvas:EnableMouse(0)
-f.treeBackgroundClip:SetScrollChild(f.treeBackground)
 f.treeBackground:EnableMouse(0)
 f.treeBackgroundClip:EnableMouse(0)
 f.blankPane:EnableMouse(0)
-f.treeBackgroundClip:SetVerticalScroll(0)
-f.treeBackgroundClip:SetHorizontalScroll(0)
 
 local thumb=tiScrollBar:GetThumbTexture()
 if thumb then thumb:SetWidth(18); thumb:SetHeight(20) end
@@ -810,15 +888,17 @@ local function TalentInspect_SetSliderFromCursor()
   local top=tiScrollBar:GetTop()
   local bottom=tiScrollBar:GetBottom()
   if not top or not bottom or top<=bottom then return end
-  local halfThumb=10
-  local endPad=2
-  top=top-halfThumb-endPad
-  bottom=bottom+halfThumb+endPad
-  if top<=bottom then return end
+
+  -- SNAPSCROLL1: there are deliberately only TWO legal viewport states:
+  -- fully at the top and fully at the bottom. Clicking or dragging the
+  -- scrollbar chooses the nearest half rather than exposing partial rows.
   local minValue,maxValue=tiScrollBar:GetMinMaxValues()
-  local pct=(top-cy)/(top-bottom)
-  if pct<0 then pct=0 elseif pct>1 then pct=1 end
-  tiScrollBar:SetValue(minValue+(maxValue-minValue)*pct)
+  local midpoint=(top+bottom)/2
+  local target
+  if cy>=midpoint then target=minValue else target=maxValue end
+  if (tiScrollBar:GetValue() or minValue)~=target then
+    tiScrollBar:SetValue(target)
+  end
 end
 
 local function TalentInspect_DragUpdate()
@@ -842,14 +922,21 @@ end)
 local tiScrollSyncing=nil
 TalentInspect_UpdateScrollRange = function()
   if not f.scroll or not f.canvas or not tiScrollBar then return end
-  local range=(f.canvas:GetHeight() or TREE_CANVAS_H)-(f.scroll:GetHeight() or TREE_VIEW_H)
-  if range<0 then range=0 end
+  -- ROWSNAP2: this UI intentionally has only TOP and BOTTOM.
+  -- Make BOTTOM exactly one talent-row (55 units) below TOP. Do not derive
+  -- this from frame dimensions, which can pick up fractional UI-scale rounding.
+  local range=GRID_Y
   local value=tiScrollBar:GetValue() or 0
   if value<0 then value=0 end
   if value>range then value=range end
   tiScrollSyncing=1
   tiScrollBar:SetMinMaxValues(0,range)
-  tiScrollBar:SetValueStep(WHEEL_STEP)
+  -- SNAPSCROLL1: slider has only the top and bottom stops.
+  tiScrollBar:SetValueStep(range>0 and range or 1)
+  -- Any stale/midpoint value from an older build is normalized immediately.
+  if range>0 and value>0 then
+    if value<(range/2) then value=0 else value=range end
+  end
   tiScrollBar:SetValue(value)
   tiScrollSyncing=nil
   f.scroll:SetVerticalScroll(value)
@@ -865,6 +952,20 @@ tiScrollBar:SetScript("OnValueChanged",function()
   local minValue,maxValue=this:GetMinMaxValues()
   if value<minValue then value=minValue end
   if value>maxValue then value=maxValue end
+
+  -- SNAPSCROLL1 safety net: even if the legacy Slider internally reports an
+  -- intermediate drag/click value, collapse it to the nearest legal stop.
+  local snapped=value
+  if maxValue>minValue then
+    if value<((minValue+maxValue)/2) then snapped=minValue else snapped=maxValue end
+  end
+  if snapped~=value then
+    tiScrollSyncing=1
+    this:SetValue(snapped)
+    tiScrollSyncing=nil
+    value=snapped
+  end
+
   f.scroll:SetVerticalScroll(value)
   if applyViewportClipping then applyViewportClipping() end
   if value<=minValue then tiScrollUp:Disable() else tiScrollUp:Enable() end
@@ -874,31 +975,25 @@ end)
 tiScrollUp:SetScript("OnClick",function()
   TalentInspect_UpdateScrollRange()
   local minValue,maxValue=tiScrollBar:GetMinMaxValues()
-  local value=(tiScrollBar:GetValue() or 0)-20
-  if value<minValue then value=minValue end
-  tiScrollBar:SetValue(value)
+  tiScrollBar:SetValue(minValue)
   PlaySound("UChatScrollButton")
 end)
 tiScrollDown:SetScript("OnClick",function()
   TalentInspect_UpdateScrollRange()
   local minValue,maxValue=tiScrollBar:GetMinMaxValues()
-  local value=(tiScrollBar:GetValue() or 0)+20
-  if value>maxValue then value=maxValue end
-  tiScrollBar:SetValue(value)
+  tiScrollBar:SetValue(maxValue)
   PlaySound("UChatScrollButton")
 end)
 
 TalentInspect_MouseWheel = function(delta)
   TalentInspect_UpdateScrollRange()
   local minValue,maxValue=tiScrollBar:GetMinMaxValues()
-  local value=tiScrollBar:GetValue() or 0
   delta=delta or 0
-  value=value-(delta*WHEEL_STEP)
-  if value<minValue then value=minValue end
-  if value>maxValue then value=maxValue end
-  tiScrollBar:SetValue(value)
-  f.scroll:SetVerticalScroll(value)
-  if applyViewportClipping then applyViewportClipping() end
+  if delta>0 then
+    tiScrollBar:SetValue(minValue)
+  elseif delta<0 then
+    tiScrollBar:SetValue(maxValue)
+  end
 end
 
 local function routeWheel(frame)
@@ -985,7 +1080,6 @@ local function hideButtons()
     end
     if b.rankBG then b.rankBG:Hide() end
   end
-  for _,c in pairs(TI.connectors) do hideConnector(c) end
 end
 
 local requestTalentDescription
@@ -1042,134 +1136,162 @@ local function setTalentBorderColor(b,r,g,blue,a)
   -- No custom talent outline. Icon saturation + rank text convey state.
 end
 
-local function connector(i)
-  local c=TI.connectors[i]
-  if not c then
-    c={segments={},active={}}
-    for n=1,3 do
-      local t=f.canvas:CreateTexture(nil,"BORDER")
-      t:SetTexture(1,0.82,0,0.78)
-      c.segments[n]=t
-      c.active[n]=nil
+-- TREEISOLATE2: never move the same connector Texture objects between
+-- different talent tabs.  The 1.12 renderer can briefly retain old geometry
+-- when a reused texture is hidden/reanchored/shown during a rapid page swap.
+-- Keep one lightweight connector layer/pool per tab and switch the whole layer.
+TI.connectorPages = TI.connectorPages or {}
+
+local function getConnectorPage(page)
+  page=page or 1
+  local cp=TI.connectorPages[page]
+  if cp then return cp end
+
+  local layer=CreateFrame("Frame",nil,f.canvas)
+  layer:ClearAllPoints()
+  layer:SetPoint("TOPLEFT",f.canvas,"TOPLEFT",0,0)
+  layer:SetPoint("BOTTOMRIGHT",f.canvas,"BOTTOMRIGHT",0,0)
+  layer:SetFrameLevel((f.canvas and f.canvas:GetFrameLevel() or f:GetFrameLevel())+20)
+  layer:EnableMouse(0)
+  layer:Hide()
+
+  cp={frame=layer,connectors={},use=0}
+  TI.connectorPages[page]=cp
+  return cp
+end
+
+local function resetConnectorPool(page)
+  if page then
+    local cp=TI.connectorPages[page]
+    if not cp then return end
+    cp.use=0
+    for _,c in pairs(cp.connectors or {}) do
+      if c and c.segments then
+        for _,seg in pairs(c.segments) do
+          seg:Hide()
+          seg:ClearAllPoints()
+        end
+      end
     end
-    TI.connectors[i]=c
+    return
   end
-  return c
+
+  -- A tab change first hides every page-level connector frame.  This is the
+  -- hard identity boundary; no old-tree texture remains visible while the new
+  -- talent buttons are being rebound.
+  for _,cp in pairs(TI.connectorPages) do
+    if cp then
+      cp.use=0
+      if cp.frame then cp.frame:Hide() end
+      for _,c in pairs(cp.connectors or {}) do
+        if c and c.segments then
+          for _,seg in pairs(c.segments) do
+            seg:Hide()
+            seg:ClearAllPoints()
+          end
+        end
+      end
+    end
+  end
+end
+
+local function activateConnectorPage(page)
+  -- Hide all layers before exposing the selected one.
+  for p,cp in pairs(TI.connectorPages) do
+    if cp and cp.frame then cp.frame:Hide() end
+  end
+  local cp=getConnectorPage(page)
+  resetConnectorPool(page)
+  cp.frame:Show()
+  return cp
+end
+
+local function acquireConnector(page)
+  local cp=getConnectorPage(page)
+  cp.use=(cp.use or 0)+1
+  local slot=cp.use
+  local c=cp.connectors[slot]
+  if not c then
+    c={segments={}}
+    for n=1,3 do
+      c.segments[n]=cp.frame:CreateTexture(nil,"BORDER")
+    end
+    cp.connectors[slot]=c
+  end
+  for _,seg in pairs(c.segments) do
+    seg:Hide()
+    seg:ClearAllPoints()
+  end
+  return c,cp
 end
 
 hideConnector = function(c)
   if not c or not c.segments then return end
-  for n,seg in pairs(c.segments) do
+  for _,seg in pairs(c.segments) do
     seg:Hide()
-    if c.active then c.active[n]=nil end
+    seg:ClearAllPoints()
   end
-  c.minDown=nil
-  c.maxDown=nil
 end
 
-local function drawPrereq(talent, idx)
-  -- FR4L: ALWAYS clear the reusable connector slot before deciding whether
-  -- this talent currently has a prerequisite. Previously the early return
-  -- below occurred first, leaving stale yellow arrows on no-prereq talents.
-  local c=connector(idx)
-  hideConnector(c)
+local function styleConnectorSegment(seg)
+  -- CLEAN5: use the same lightweight gold prerequisite connector on every UI profile.
+  -- No rank/maxRank state checks; color is static during tree rendering for stability.
+  seg:SetTexture(1,0.82,0,0.92)
+end
 
-  if not talent or not talent.preTier or talent.preTier==0 or
-     not talent.preCol or talent.preCol==0 then
-    return
-  end
+local function drawPrereq(source, target, page)
+  if not source or not target or not source.tier or not source.col or
+     not target.tier or not target.col then return end
 
-  -- FR3b: prerequisite RELATIONSHIPS stay data-driven, while geometry is
-  -- derived from source/target row+column. Preserve the established pfUI
-  -- appearance exactly: simple 3px sleek yellow connector segments.
-  local sourceX=GRID_X0+(talent.preCol-1)*GRID_X
-  local sourceDown=GRID_Y0+(talent.preTier-1)*GRID_Y
-  local targetX=GRID_X0+(talent.col-1)*GRID_X
-  local targetDown=GRID_Y0+(talent.tier-1)*GRID_Y
+  local c,cp=acquireConnector(page)
+  local thickness=usingPfUI() and 3 or 4
+  for _,seg in pairs(c.segments) do styleConnectorSegment(seg) end
 
+  local sourceX=GRID_X0+(source.col-1)*GRID_X
+  local sourceDown=talentDisplayY(source.tier)
+  local targetX=GRID_X0+(target.col-1)*GRID_X
+  local targetDown=talentDisplayY(target.tier)
   local sourceCenterX=sourceX+22
   local targetCenterX=targetX+22
   local sourceCenterDown=sourceDown+22
-  local targetCenterDown=targetDown+22
   local sourceBottom=sourceDown+44
   local targetTop=targetDown
 
-  -- Same-row prerequisites exist in current V5 trees (left -> right or
-  -- right -> left). The old renderer returned early here, so those links
-  -- silently disappeared even though TalentData correctly described them.
-  if talent.preTier==talent.tier and sourceCenterX~=targetCenterX then
+  if source.tier==target.tier and sourceCenterX~=targetCenterX then
     local h=c.segments[1]
-    local leftX, width
-
+    local leftX,width
     if sourceCenterX<targetCenterX then
-      -- Source icon right edge -> target icon left edge.
       leftX=sourceX+44
-      width=math.max(3,targetX-leftX)
+      width=math.max(thickness,targetX-leftX)
     else
-      -- Target icon right edge -> source icon left edge.
       leftX=targetX+44
-      width=math.max(3,sourceX-leftX)
+      width=math.max(thickness,sourceX-leftX)
     end
-
-    h:ClearAllPoints()
-    h:SetWidth(width)
-    h:SetHeight(3)
-    h:SetPoint("TOPLEFT",f.canvas,"TOPLEFT",leftX,-(sourceCenterDown-1))
-    c.active[1]=1
+    h:SetWidth(width); h:SetHeight(thickness)
+    h:SetPoint("TOPLEFT",cp.frame,"TOPLEFT",leftX,-(sourceCenterDown-math.floor(thickness/2)))
     h:Show()
-
-    c.minDown=sourceDown
-    c.maxDown=sourceDown+44
     return
   end
 
-  -- A prerequisite below/at the dependent talent is invalid for our visual
-  -- routing. Leave it hidden rather than inventing geometry.
   if targetTop<=sourceBottom then return end
-
   local gap=targetTop-sourceBottom
-
   if sourceCenterX==targetCenterX then
-    -- Straight vertical link between icon edges.
     local v=c.segments[1]
-    v:ClearAllPoints()
-    v:SetWidth(3)
-    v:SetHeight(gap)
-    v:SetPoint("TOPLEFT",f.canvas,"TOPLEFT",sourceCenterX-1,-sourceBottom)
-    c.active[1]=1
+    v:SetWidth(thickness); v:SetHeight(gap)
+    v:SetPoint("TOPLEFT",cp.frame,"TOPLEFT",sourceCenterX-math.floor(thickness/2),-sourceBottom)
     v:Show()
-
-    c.minDown=sourceBottom
-    c.maxDown=targetTop
   else
-    -- Cross-column prerequisite: preserve the established orthogonal dog-leg
-    -- look. Only geometry changed; color/thickness remain the FR3a baseline.
     local mid=sourceBottom+math.floor(gap/2)
     local v1,h,v2=c.segments[1],c.segments[2],c.segments[3]
-
-    v1:ClearAllPoints()
-    v1:SetWidth(3)
-    v1:SetHeight(math.max(2,mid-sourceBottom))
-    v1:SetPoint("TOPLEFT",f.canvas,"TOPLEFT",sourceCenterX-1,-sourceBottom)
-    c.active[1]=1
+    v1:SetWidth(thickness); v1:SetHeight(math.max(2,mid-sourceBottom))
+    v1:SetPoint("TOPLEFT",cp.frame,"TOPLEFT",sourceCenterX-math.floor(thickness/2),-sourceBottom)
     v1:Show()
-
-    h:ClearAllPoints()
-    h:SetWidth(math.max(3,math.abs(targetCenterX-sourceCenterX)))
-    h:SetHeight(3)
-    h:SetPoint("TOPLEFT",f.canvas,"TOPLEFT",math.min(sourceCenterX,targetCenterX),-mid)
-    c.active[2]=1
+    h:SetWidth(math.max(thickness,math.abs(targetCenterX-sourceCenterX))); h:SetHeight(thickness)
+    h:SetPoint("TOPLEFT",cp.frame,"TOPLEFT",math.min(sourceCenterX,targetCenterX),-(mid-math.floor(thickness/2)))
     h:Show()
-
-    v2:ClearAllPoints()
-    v2:SetWidth(3)
-    v2:SetHeight(math.max(2,targetTop-mid))
-    v2:SetPoint("TOPLEFT",f.canvas,"TOPLEFT",targetCenterX-1,-mid)
-    c.active[3]=1
+    v2:SetWidth(thickness); v2:SetHeight(math.max(2,targetTop-mid))
+    v2:SetPoint("TOPLEFT",cp.frame,"TOPLEFT",targetCenterX-math.floor(thickness/2),-mid)
     v2:Show()
-
-    c.minDown=sourceBottom
-    c.maxDown=targetTop
   end
 end
 
@@ -1183,7 +1305,7 @@ applyViewportClipping = function()
   for i,t in pairs(tab.talents or {}) do
     local b=TI.buttons[i]
     if b then
-      local topDown=GRID_Y0+(t.tier-1)*GRID_Y
+      local topDown=talentDisplayY(t.tier)
       local bottomDown=topDown+44
       if topDown>=offset and bottomDown<=(offset+viewport) then
         b:Show()
@@ -1196,18 +1318,6 @@ applyViewportClipping = function()
       end
     end
 
-    local c=TI.connectors[i]
-    if c and c.minDown and c.maxDown then
-      if c.minDown>=offset and c.maxDown<=(offset+viewport) then
-        for n,seg in pairs(c.segments) do
-          if c.active and c.active[n] then seg:Show() else seg:Hide() end
-        end
-      else
-        -- Hide only for clipping. Keep active flags/geometry so valid
-        -- prerequisite lines restore correctly when scrolling back.
-        for _,seg in pairs(c.segments) do seg:Hide() end
-      end
-    end
   end
 end
 
@@ -1223,33 +1333,33 @@ local function staticTalentFor(d,page,t)
   return TalentInspectData_FindTalent(d.class,page,nil,pos,t.index)
 end
 
-local function prerequisiteTalentForRender(d,page,t,staticTalent)
-  if not t then return t end
 
-  -- Current live packet is absolute prerequisite authority.
-  if t.prereqScanned==1 then return t end
 
-  -- Learned current-class / peer-learned geometry is next.
-  if staticTalent and TalentInspectData_GetPrerequisite then
-    local pt,pc,pr,source=TalentInspectData_GetPrerequisite(staticTalent)
-    if source=="learned" or source=="learned-none" then
-      local view={}
-      for k,v in pairs(t) do view[k]=v end
-      view.preTier=pt or 0
-      view.preCol=pc or 0
-      view.preRank=pr
-      view.prereqScanned=1
-      return view
-    end
+local function packagedTalentByExactName(classToken,page,name)
+  if not classToken or not name or name=="" or not TalentInspectData_GetTree then return nil end
+  local tree=TalentInspectData_GetTree(classToken,page)
+  if not tree or not tree.talents then return nil end
+  for _,st in pairs(tree.talents) do
+    if st and (st.name==name or st.sourceName==name) then return st end
   end
+  return nil
+end
 
-  -- Old/static geometry remains last resort.
-  return t
+local function displayedTalentByExactName(tab,name)
+  if not tab or not tab.talents or not name or name=="" then return nil end
+  for _,lt in pairs(tab.talents) do
+    if lt and lt.name==name then return lt end
+  end
+  return nil
 end
 
 local updateSpecButtonVisual
 
 local function selectTab(page)
+  -- PREREQLINES2/TREEISOLATE2: hide every page connector layer before the
+  -- selected tree identity changes.  Reused textures must never spend even
+  -- one render pass carrying geometry from the previous tree.
+  resetConnectorPool()
   TI.selectedTab=page
   if TI.embeddedPrefix and TI.hostState[TI.embeddedPrefix] then
     TI.hostState[TI.embeddedPrefix].selectedTab=page
@@ -1267,6 +1377,7 @@ local function selectTab(page)
   if f.scroll then f.scroll:Show() end
   if f.canvas then f.canvas:Show() end
   hideButtons()
+  resetConnectorPool()
   local tab=d.tabs[page]
   f.treeTitle:SetText((tab.name or "Talent Tree").."  |cffffffff"..(tab.points or 0).." points|r")
   -- FR3d: never let a remote/cached fileName choose another class's artwork.
@@ -1291,7 +1402,7 @@ local function selectTab(page)
     -- Live sync contributes only the inspected player's current ranks.
     b:ClearAllPoints()
     local x=GRID_X0+(t.col-1)*GRID_X
-    local y=-GRID_Y0-(t.tier-1)*GRID_Y
+    local y=-talentDisplayY(t.tier)
     b:SetPoint("TOPLEFT",f.canvas,"TOPLEFT",x,y)
     b:SetFrameLevel((f.canvas and f.canvas:GetFrameLevel() or f:GetFrameLevel())+35)
     b:EnableMouse(1)
@@ -1336,8 +1447,47 @@ local function selectTab(page)
     end
     if b.highlight then b.highlight:SetAlpha(0.18) end
     b:Show()
-    -- v1.1.0 release: prerequisite connector rendering is intentionally disabled.
+
   end
+
+  -- PREREQLINES2/TREEISOLATE2: prerequisite connectors are a completely
+  -- separate render pass.  Clear the pool AGAIN after all reused talent
+  -- buttons have been rebound to this tree, then derive every relationship
+  -- only from the packaged tree for THIS page and exact displayed names.
+  -- This prevents a connector from the previously selected tree from
+  -- visually landing on unrelated talents that happen to occupy the same
+  -- coordinates.  No connector creation/rebuild happens while scrolling.
+  activateConnectorPage(page)
+  local packagedTree=TalentInspectData_GetTree and TalentInspectData_GetTree(d.class,page)
+  local learnedClass=TalentInspectData_GetLearnedClass and TalentInspectData_GetLearnedClass(d.class)
+  local learnedTree=learnedClass and learnedClass.trees and learnedClass.trees[page]
+
+  -- LIVEPREREQ2 authority is identity-first:
+  --   learned exact-name relationship > packaged exact-name relationship > none.
+  -- Rendering never consumes saved prerequisite coordinates and never scans the
+  -- game API. The live scanner updates DATA only; this pass draws DATA only.
+  if packagedTree and packagedTree.talents then
+    for _,packagedTarget in pairs(packagedTree.talents) do
+      if packagedTarget then
+        local targetName=packagedTarget.name or packagedTarget.sourceName
+        local prereqName=nil
+        local learnedTarget=learnedTree and learnedTree.byName and targetName and learnedTree.byName[targetName]
+        if learnedTarget and learnedTarget.prereqScanned==1 then
+          prereqName=learnedTarget.prereqName or "" -- empty means authoritative NONE
+        else
+          prereqName=packagedTarget.prereq or ""
+        end
+        if prereqName~="" then
+          local displayedTarget=displayedTalentByExactName(tab,targetName)
+          local displayedSource=displayedTalentByExactName(tab,prereqName)
+          if displayedSource and displayedTarget then
+            drawPrereq(displayedSource,displayedTarget,page)
+          end
+        end
+      end
+    end
+  end
+
   for i=1,3 do
     local bt=f.tabs[i]
     local td=d.tabs[i]
@@ -1513,7 +1663,7 @@ local function sendLocalTo(target, channel)
       for i,t in pairs(tab.talents) do
         -- Keep every payload comfortably under the 1.12 254-byte prefix+message cap.
         -- Talent descriptions are static DB/UI data and are not sent.
-        local msg="TAL^"..to.."^"..session.."^"..p.."^"..i.."^"..safe(t.name).."^"..safe(t.icon).."^"..t.tier.."^"..t.col.."^"..t.rank.."^"..t.maxRank.."^"..(t.preTier or 0).."^"..(t.preCol or 0).."^"..(t.prereqScanned or 0)
+        local msg="TAL^"..to.."^"..session.."^"..p.."^"..i.."^"..safe(t.name).."^"..safe(t.icon).."^"..t.tier.."^"..t.col.."^"..t.rank.."^"..t.maxRank.."^0^0^0"
         if string.len(TI.PREFIX)+string.len(msg)<=254 then
           queueSend(msg,channel)
         end
@@ -1645,7 +1795,7 @@ end
 local function showBlankLoadedStatus(noTransport)
   showNoSyncMessages(
     noTransport and "Target NOT in party, raid, guild" or nil,
-    "No Sync Data Blank Loaded",
+    "No sync data blank loaded",
     "blank"
   )
 end
@@ -1653,7 +1803,7 @@ end
 local function showSyncSuccessStatus()
   -- STATUSGREEN1: once sync succeeds, positively confirm transport eligibility
   -- in the same top/left status position that shows the red failure message.
-  showNoSyncMessages("Target IN party, raid, guild","Sync Data Load Successful","success")
+  showNoSyncMessages("Target IS in party, raid, guild","Sync data load successful","success")
   if f.noSyncLeft then
     f.noSyncLeft:SetTextColor(0.20,1.00,0.20)
   end
@@ -1670,21 +1820,23 @@ local function showZeroTalentFallback(name,classToken,leftText,rightText)
   local d=buildZeroTalentData(name,classToken,UnitLevel("target"))
   if not d or not d.tabs or not d.tabs[1] then return nil end
 
+  local hs=TI.hostState and TI.hostState.InspectFrame
+  local keepTab=(hs and hs.selectedTab) or TI.selectedTab or 1
+  if keepTab<1 or keepTab>3 then keepTab=1 end
+
   TI.currentName=name
   TI.currentData=d
-  TI.selectedTab=1
+  TI.selectedTab=keepTab
 
-  local hs=TI.hostState and TI.hostState.InspectFrame
   if hs then
     hs.name=name
     hs.data=d
-    hs.selectedTab=1
+    hs.selectedTab=keepTab
   end
 
   showData(d,"No sync data")
-  -- Explicitly render tree 1 after the static zero data is bound. The other
-  -- two tree tabs remain live and switch to their own complete zero-rank trees.
-  selectTab(1)
+  -- TABSTAY1: keep the same tree page while provisional/blank data is shown.
+  selectTab(keepTab)
   showBlankLoadedStatus(leftText=="Target NOT in party, raid, guild")
   return 1
 end
@@ -1752,6 +1904,9 @@ local function showNoTransport(name)
       "Target NOT in party, raid, guild",
       nil
     ) then
+      TI.requestGuardName=name
+      TI.requestLoadedName=name
+      TI.requestCooldownUntil=nil
       return
     end
   end
@@ -1767,6 +1922,18 @@ end
 
 local function request(name)
   if not name or name=="" then return end
+
+  -- SPAMGUARD2_7S: coalesce impatient back-to-back Talents clicks for 7 seconds.
+  -- This is only a time gate around the actual sync request; repeated popup/tab
+  -- clicks may still raise/reuse the UI, but they cannot queue another REQ.
+  local guardNow=nowSeconds()
+  if TI.requestGuardName==name and TI.requestCooldownUntil and
+     guardNow<TI.requestCooldownUntil then
+    if f:IsShown() and f.Raise then f:Raise() end
+    return
+  end
+  TI.requestGuardName=name
+  TI.requestCooldownUntil=guardNow+7.0
 
   TI.renderGeneration=(TI.renderGeneration or 0)+1
   TI.renderOwner=name
@@ -2106,11 +2273,16 @@ local function showEmbeddedTalents(host, prefix)
   end
 
   local hs=TI.hostState.InspectFrame
+  local keepTab=(hs and hs.selectedTab) or TI.selectedTab or 1
+  if keepTab<1 or keepTab>3 then keepTab=1 end
 
   -- Player transition boundary: invalidate every visible reference belonging
   -- to the previous inspected player before the new player's cache/request is
   -- allowed to show anything.
   if TI.currentName~=name or (hs and hs.name and hs.name~=name) then
+    TI.requestGuardName=nil
+    TI.requestLoadedName=nil
+    TI.requestCooldownUntil=nil
     f:Hide()
     hideButtons()
 
@@ -2129,9 +2301,9 @@ local function showEmbeddedTalents(host, prefix)
     if hs then
       hs.name=name
       hs.data=nil
-      hs.selectedTab=1
+      hs.selectedTab=keepTab
     end
-    TI.selectedTab=1
+    TI.selectedTab=keepTab
   end
 
   if f.scroll then f.scroll:Show() end
@@ -2164,6 +2336,9 @@ end
 local function hideEmbeddedForHost(host)
   if TI.embeddedHost==host then
     stopFallbackTimer()
+    TI.requestGuardName=nil
+    TI.requestLoadedName=nil
+    TI.requestCooldownUntil=nil
     if f.blankPane then f.blankPane:Hide() end
     f:Hide()
     TI.embeddedHost=nil
@@ -2419,13 +2594,15 @@ local function resetInspectTalentView(newName)
   TI.currentData=nil
   TI.currentName=newName
   TI.hoveredTalentButton=nil
-  TI.selectedTab=1
-  if GameTooltip then GameTooltip:Hide() end
   local hs=TI.hostState and TI.hostState.InspectFrame
+  local keepTab=(hs and hs.selectedTab) or TI.selectedTab or 1
+  if keepTab<1 or keepTab>3 then keepTab=1 end
+  TI.selectedTab=keepTab
+  if GameTooltip then GameTooltip:Hide() end
   if hs then
     hs.name=newName
     hs.data=nil
-    hs.selectedTab=1
+    hs.selectedTab=keepTab
   end
 end
 
@@ -2818,9 +2995,7 @@ eventFrame:SetScript("OnEvent", function()
     local p=tonumber(a[4]); local i=tonumber(a[5])
     if not p or p<1 or p>3 or not i or i<1 or i>80 or not d.tabs[p] then return end
     d.tabs[p].talents[i]={index=i,name=unsafe(a[6]),icon=unsafe(a[7]),tier=tonumber(a[8]) or 1,col=tonumber(a[9]) or 1,
-      rank=tonumber(a[10]) or 0,maxRank=tonumber(a[11]) or 1,
-      preTier=tonumber(a[12]) or 0,preCol=tonumber(a[13]) or 0,
-      prereqScanned=tonumber(a[14]) or 0}
+      rank=tonumber(a[10]) or 0,maxRank=tonumber(a[11]) or 1}
   elseif cmd=="END" then
     local d=TI.pending[a[3]]; if not d or d.sender~=sender then return end
     TI.pending[a[3]]=nil
@@ -2848,6 +3023,9 @@ eventFrame:SetScript("OnEvent", function()
       end
     end
     markSyncComplete(d.name)
+    TI.requestGuardName=d.name
+    TI.requestLoadedName=d.name
+    TI.requestCooldownUntil=nil
     cacheData(d)
 
     -- Preserve the inspected player's view independently of local CharacterFrame.
@@ -3036,9 +3214,14 @@ TI.CancelNativeTabEmbed=cancelNativeTabEmbed
 -- Blizzard player right-click menu ------------------------------------------
 local POP="VPTI_INSPECT_TALENTS"
 if UnitPopupButtons and UnitPopupMenus then
-  -- FR1d: use the native Duel interaction distance. UnitPopup will grey
-  -- and disable this entry the same way it does other distance-gated actions.
-  UnitPopupButtons[POP]={text="Talents",dist=3}
+  -- HF3: Vanilla 1.12 UnitPopup expects every button to have a numeric dist.
+  -- Leaving it nil makes UnitPopup_OnUpdate compare a number against nil
+  -- (seen on GUILD/FRIEND roster popups). A positive dist is also unsafe there
+  -- because those menus may have no valid unit token and FrameXML then calls
+  -- CheckInteractDistance(nil, distIndex). dist=0 is the safe native sentinel:
+  -- no Blizzard range query; TalentInspect performs its own guarded range check
+  -- only when the Talents action is actually clicked.
+  UnitPopupButtons[POP]={text="Talents",dist=0}
   local menus={"PLAYER","PARTY","RAID_PLAYER","FRIEND","GUILD","TARGET"}
   for _,m in ipairs(menus) do
     if UnitPopupMenus[m] then
@@ -3047,26 +3230,46 @@ if UnitPopupButtons and UnitPopupMenus then
       if not found then table.insert(UnitPopupMenus[m],POP) end
     end
   end
+  -- HF4: UIDROPDOWNMENU_INIT_MENU is NOT always a unit token. On the vanilla
+  -- Friends/Guild roster it can literally be the global frame name
+  -- "FriendsDropDown"/"GuildFrameDropDown". Passing those strings to
+  -- UnitExists() throws "Unknown unit name" on this client. Resolve frame
+  -- names first and call UnitExists only on known-safe unit-token shapes.
+  local function isSafeUnitToken(unit)
+    if type(unit)~="string" then return nil end
+    if unit=="player" or unit=="target" or unit=="pet" or unit=="mouseover" then return 1 end
+    if string.find(unit,"^party%d+$") then return 1 end
+    if string.find(unit,"^raid%d+$") then return 1 end
+    if string.find(unit,"^party%d+pet$") then return 1 end
+    if string.find(unit,"^raid%d+pet$") then return 1 end
+    return nil
+  end
+
+  local function popupDropdownObject()
+    local dropdown=UIDROPDOWNMENU_INIT_MENU
+    if type(dropdown)=="table" then return dropdown end
+    if type(dropdown)=="string" and getglobal then
+      local obj=getglobal(dropdown)
+      if type(obj)=="table" then return obj end
+    end
+    return nil
+  end
+
   local function resolvePopupPlayerName()
     local dropdown=UIDROPDOWNMENU_INIT_MENU
+    local obj=popupDropdownObject()
 
-    -- Different 1.12/custom clients expose UIDROPDOWNMENU_INIT_MENU in
-    -- different shapes. Stock-like clients may provide a dropdown table,
-    -- while VanillaPlus/custom FrameXML may leave a string token here.
-    if type(dropdown)=="table" then
-      if dropdown.name and dropdown.name~="" then
-        return dropdown.name
+    if obj then
+      if obj.name and obj.name~="" then return obj.name end
+      if isSafeUnitToken(obj.unit) and UnitExists(obj.unit) then
+        return UnitName(obj.unit)
       end
-      if dropdown.unit and UnitExists(dropdown.unit) then
-        return UnitName(dropdown.unit)
-      end
-    elseif type(dropdown)=="string" and UnitExists(dropdown) then
+    elseif isSafeUnitToken(dropdown) and UnitExists(dropdown) then
       return UnitName(dropdown)
     end
 
-    -- TalentInspect is primarily invoked after targeting the player, so this
-    -- is the safest cross-client fallback when the popup does not expose its
-    -- owner as a table. Never index the string as though it were a frame.
+    -- If the popup itself does not expose a roster name, use target only when
+    -- it is a real player. Never reinterpret a dropdown-frame name as a unit.
     if UnitExists("target") and UnitIsPlayer("target") then
       return UnitName("target")
     end
@@ -3076,15 +3279,17 @@ if UnitPopupButtons and UnitPopupMenus then
 
   local function resolvePopupUnit()
     local dropdown=UIDROPDOWNMENU_INIT_MENU
-    if type(dropdown)=="table" then
-      if dropdown.unit and UnitExists(dropdown.unit) and UnitIsPlayer(dropdown.unit) then
-        return dropdown.unit
+    local obj=popupDropdownObject()
+
+    if obj then
+      if isSafeUnitToken(obj.unit) and UnitExists(obj.unit) and UnitIsPlayer(obj.unit) then
+        return obj.unit
       end
-      if dropdown.name and UnitExists("target") and UnitIsPlayer("target") and
-         UnitName("target")==dropdown.name then
+      if obj.name and UnitExists("target") and UnitIsPlayer("target") and
+         UnitName("target")==obj.name then
         return "target"
       end
-    elseif type(dropdown)=="string" and UnitExists(dropdown) and UnitIsPlayer(dropdown) then
+    elseif isSafeUnitToken(dropdown) and UnitExists(dropdown) and UnitIsPlayer(dropdown) then
       return dropdown
     end
 
@@ -3107,9 +3312,8 @@ if UnitPopupButtons and UnitPopupMenus then
       if this and this.value==POP then
         local name=resolvePopupPlayerName()
 
-        -- FR1d safety guard: native UnitPopup dist=3 should already make this
-        -- grey/non-clickable when out of Duel range. Re-check here anyway so
-        -- a custom UnitPopup implementation cannot bypass the distance rule.
+        -- HF3: native popup distance is deliberately dist=0 for roster safety.
+        -- Enforce TalentInspect's real interaction-range rule here instead.
         if name==UnitName("player") or not popupTalentInRange() then
           CloseDropDownMenus()
           return
