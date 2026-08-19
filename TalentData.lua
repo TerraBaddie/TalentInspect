@@ -670,6 +670,7 @@ local function TalentInspectData_MergeTalent(staticTalent,learnedTalent)
     out.preTier=learnedTalent.preTier
     out.preCol=learnedTalent.preCol
     out.preRank=learnedTalent.preRank
+    out.prereqName=learnedTalent.prereqName or ""
     out.prereq=nil
     out.prereqScanned=1
   end
@@ -785,13 +786,13 @@ end
 function TalentInspectData_GetPrerequisite(talent)
   if not talent then return nil,nil,nil,"none" end
   if talent.prereqScanned==1 then
-    if talent.preTier and talent.preCol and talent.preTier>0 and talent.preCol>0 then
-      return talent.preTier,talent.preCol,talent.preRank,"learned"
+    if talent.prereqName and talent.prereqName~="" then
+      return talent.prereqName,nil,talent.preRank,"learned-name"
     end
     return nil,nil,nil,"learned-none"
   end
-  if talent.preTier and talent.preCol and talent.preTier>0 and talent.preCol>0 then
-    return talent.preTier,talent.preCol,talent.preRank,"legacy"
+  if talent.prereq and talent.prereq~="" then
+    return talent.prereq,nil,nil,"static-name"
   end
   return nil,nil,nil,"none"
 end
