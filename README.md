@@ -43,7 +43,7 @@ v1.3.0 is the Prerequisite Talent Lines and more stabilities release.
 ## v1.3.0 Improvements / changes
 
 - Restored gold/yellow prerequisite talent lines with stronger cross-tree isolation and safer rendering.
-- Added self-learning prerequisite support using live VanillaPlus talent data, with packaged data retained as the offline fallback.
+- Added self-learning prerequisite support using live VanillaPlus talent data, with packaged andser99 talent tree data retained as the offline fallback.
 - Restored the proven 7-second Talents request spam guard to prevent duplicate sync requests.
 - Fixed Guild/Friends right-click Talents handling for Vanilla 1.12.1 UnitPopup menus.
 - Retained SAFEUIBASE1 UI improvements including icon borders, clipping, snap scrolling, tab persistence, and Blizzard/pfUI support.
