@@ -103,20 +103,6 @@ local function tooltipDescription(tab,index)
   return table.concat(parts,"\n")
 end
 
-local function prereqInfo(tab,index)
-  if not GetTalentPrereqs then return nil,nil,nil,nil end
-  local ok,a,b,c=pcall(GetTalentPrereqs,tab,index)
-  if not ok then return nil,nil,nil,nil end
-  local tier=tonumber(a)
-  local col=tonumber(b)
-  local rank=tonumber(c)
-  if tier and col and tier>=1 and tier<=7 and col>=1 and col<=4 then
-    return tier,col,rank,1
-  end
-  -- Successful call + no valid coordinates is authoritative "no prerequisite".
-  return nil,nil,nil,1
-end
-
 local function makePos(tier,col)
   if not tier or not col then return nil end
   return "r"..tier.."c"..col
@@ -153,6 +139,31 @@ function H:RestoreLearned()
               if t.pos then tree.byPos[t.pos]=t end
             end
           end
+
+          -- LIVEPREREQ2 migration: older learned caches stored
+          -- prerequisite geometry only. Resolve that geometry ONCE into exact
+          -- same-tree talent identity. New scans/sync never depend on the saved
+          -- coordinates for rendering.
+          for _,t in pairs(tree.talents) do
+            if t and t.prereqScanned==1 and t.prereqName==nil then
+              local pt=tonumber(t.preTier)
+              local pc=tonumber(t.preCol)
+              if pt and pc and pt>0 and pc>0 then
+                local pre=tree.byPos[makePos(pt,pc)]
+                if pre and pre.name and pre.name~="" and pre.name~=t.name then
+                  t.prereqName=pre.name
+                else
+                  -- An old coordinate that cannot resolve cleanly is UNKNOWN,
+                  -- not authoritative NONE. Fall back to packaged data until a
+                  -- fresh local class scan can prove the relationship.
+                  t.prereqScanned=nil
+                  t.prereqName=nil
+                end
+              else
+                t.prereqName=""
+              end
+            end
+          end
         end
       end
     end
@@ -186,7 +197,6 @@ function H:ScanCurrentClass(reason,includeDescriptions)
     for index=1,numTalents do
       local name,icon,tier,col,rank,maxRank=GetTalentInfo(tab,index)
       if name and tier and col then
-        local preTier,preCol,preRank,prereqScanned=prereqInfo(tab,index)
         local rec={
           learned=1,
           source="live-scan",
@@ -199,10 +209,6 @@ function H:ScanCurrentClass(reason,includeDescriptions)
           pos=makePos(tier,col),
           rank=rank or 0,
           maxRank=maxRank or 0,
-          preTier=preTier,
-          preCol=preCol,
-          preRank=preRank,
-          prereqScanned=prereqScanned,
           desc=nil,
           descRank=((rank or 0)>0 and (rank or 0) or 1),
           scannedAt=classData.scannedAt
@@ -234,6 +240,44 @@ function H:ScanCurrentClass(reason,includeDescriptions)
         tree.byName[name]=rec
         if rec.pos then tree.byPos[rec.pos]=rec end
         total=total+1
+      end
+    end
+
+    -- LIVEPREREQ2: scan prerequisite geometry only after the
+    -- entire native tree has been captured. Immediately convert API coordinates
+    -- into exact talent names inside THIS tree. This makes the learned record
+    -- resilient to native index reordering and gives us an authoritative empty
+    -- string when the client says a talent has no prerequisite.
+    if GetTalentPrereqs then
+      for index=1,numTalents do
+        local rec=tree.talents[index]
+        if rec then
+          local ok,a,b,c=pcall(GetTalentPrereqs,tab,index)
+          if ok then
+            rec.prereqScanned=1
+            local pt=tonumber(a); local pc=tonumber(b); local pr=tonumber(c)
+            if pt and pc and pt>=1 and pt<=7 and pc>=1 and pc<=4 then
+              local pre=tree.byPos[makePos(pt,pc)]
+              -- Never preserve an unresolved coordinate as authority. A valid
+              -- prerequisite must resolve to an exact source identity in the
+              -- same live tree or it is treated as unknown for this scan.
+              if pre and pre.name and pre.name~="" and pre.name~=rec.name then
+                rec.prereqName=pre.name
+                rec.preTier=pt
+                rec.preCol=pc
+                rec.preRank=pr
+              else
+                rec.prereqScanned=nil
+                rec.prereqName=nil
+              end
+            else
+              rec.prereqName=""
+              rec.preTier=0
+              rec.preCol=0
+              rec.preRank=nil
+            end
+          end
+        end
       end
     end
 
@@ -335,8 +379,7 @@ local function learnedFingerprint(d)
         if t then
           local s=(t.name or "").."|"..tostring(t.tier or 0).."|"..
             tostring(t.col or 0).."|"..tostring(t.maxRank or 0).."|"..
-            tostring(t.preTier or 0).."|"..tostring(t.preCol or 0).."|"..
-            tostring(t.preRank or 0).."|"..tostring(t.prereqScanned or 0).."|"..
+            tostring(t.prereqScanned or 0).."|"..(t.prereqName or "").."|"..
             tostring(t.descRank or 0).."|"..(t.desc or "")
           for n=1,string.len(s) do
             sum=math.mod(sum*33+string.byte(s,n),2147483647)
@@ -377,9 +420,9 @@ function H:SerializeLearnedTalent(t)
   return table.concat({
     tostring(t.index or 0),peerSafe(t.name),peerSafe(t.icon),
     tostring(t.tier or 0),tostring(t.col or 0),tostring(t.maxRank or 0),
-    tostring(t.preTier or 0),tostring(t.preCol or 0),tostring(t.preRank or 0),
+    tostring(t.prereqScanned or 0),peerSafe(t.prereqName or ""),tostring(t.preRank or 0),
     tostring(t.descRank or (((t.rank or 0)>0) and t.rank or 1)),
-    tostring(t.prereqScanned or 0)
+    "1"
   },"~")
 end
 
@@ -422,9 +465,15 @@ function H:AcceptPeerTalent(classToken,treeIndex,payload)
   if not tree then tree={talents={},byName={},byPos={}}; d.trees[treeIndex]=tree end
   local rec={learned=1,source="peer-learned",index=index,sourceName=name,name=name,
     icon=peerUnsafe(f[3]),tier=tier,col=col,pos=makePos(tier,col),rank=0,
-    maxRank=tonumber(f[6]) or 0,preTier=tonumber(f[7]),preCol=tonumber(f[8]),
-    preRank=tonumber(f[9]),descRank=tonumber(f[10]) or 1,
-    prereqScanned=tonumber(f[11]) or 0,desc=nil,scannedAt=time and time() or 0}
+    maxRank=tonumber(f[6]) or 0,descRank=tonumber(f[10]) or 1,
+    desc=nil,scannedAt=time and time() or 0}
+  -- LIVEPREREQ2 structural packet marker is field 11 == 1. Older peers sent
+  -- zeroes in fields 7-9, so they remain non-authoritative for prerequisites.
+  if tonumber(f[11])==1 and tonumber(f[7])==1 then
+    rec.prereqScanned=1
+    rec.prereqName=peerUnsafe(f[8] or "")
+    rec.preRank=tonumber(f[9])
+  end
   tree.talents[index]=rec; tree.byName[name]=rec
   if rec.pos then tree.byPos[rec.pos]=rec end
   return 1
