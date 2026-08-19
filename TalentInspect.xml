@@ -167,22 +167,24 @@
         </ScrollChild>
       </ScrollFrame>
 
-      <!-- Fixed native background clip, independent from talent scrolling. -->
-      <ScrollFrame name="TalentInspectTreeBackgroundClip" enableMouse="false">
+      <!-- BACKGROUNDFIX1: static tree artwork.  Blizzard's TalentFrame keeps
+           background artwork outside the scrolling talent child.  Do not use a
+           second ScrollFrame just to clip these textures on legacy clients. -->
+      <Frame name="TalentInspectTreeBackgroundClip" enableMouse="false">
         <Size x="320" y="350"/>
         <Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectTreeScroll" relativePoint="TOPLEFT"/></Anchors>
-        <ScrollChild>
+        <Frames>
           <Frame name="TalentInspectTreeBackground" enableMouse="false">
-            <Size x="320" y="384"/>
+            <Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors>
             <Layers><Layer level="BACKGROUND">
               <Texture name="TalentInspectTreeTile1"><Size x="256" y="256"/><Anchors><Anchor point="TOPLEFT"/></Anchors></Texture>
               <Texture name="TalentInspectTreeTile2"><Size x="64" y="256"/><Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectTreeTile1" relativePoint="TOPRIGHT"/></Anchors></Texture>
-              <Texture name="TalentInspectTreeTile3"><Size x="256" y="128"/><Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectTreeTile1" relativePoint="BOTTOMLEFT"/></Anchors></Texture>
-              <Texture name="TalentInspectTreeTile4"><Size x="64" y="128"/><Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectTreeTile2" relativePoint="BOTTOMLEFT"/></Anchors></Texture>
+              <Texture name="TalentInspectTreeTile3"><Size x="256" y="94"/><Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectTreeTile1" relativePoint="BOTTOMLEFT"/></Anchors></Texture>
+              <Texture name="TalentInspectTreeTile4"><Size x="64" y="94"/><Anchors><Anchor point="TOPLEFT" relativeTo="TalentInspectTreeTile2" relativePoint="BOTTOMLEFT"/></Anchors></Texture>
             </Layer></Layers>
           </Frame>
-        </ScrollChild>
-      </ScrollFrame>
+        </Frames>
+      </Frame>
 
       <!-- Emergency fail-closed placeholder only. Normal inspect flow never shows this. -->
       <Frame name="TalentInspectBlankPane" enableMouse="false" hidden="true">
