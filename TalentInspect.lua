@@ -660,8 +660,8 @@ local function setEmbeddedMode(host)
     f.noSyncLeft:ClearAllPoints()
     f.noSyncRight:ClearAllPoints()
     if usingPfUI() then
-      -- User mock-up: white status text on the open strip above the spec tabs.
-      f.noSyncLeft:SetPoint("TOPLEFT",f,"TOPLEFT",64,22)
+      -- pfUI keeps its original status position.
+      f.noSyncLeft:SetPoint("TOPLEFT",f,"TOPLEFT",-1,32)
       f.noSyncRight:SetPoint("TOPLEFT",f,"TOPLEFT",-1,-3)
     else
       -- HEADERCLEAN3/TABDOWN1: keep the target/sync status inside the open
