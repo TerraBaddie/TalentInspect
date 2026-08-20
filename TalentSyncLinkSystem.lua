@@ -94,6 +94,7 @@ function L:BuildLink(button)
 end
 
 function TalentSyncLinkSystem_OnTalentClick(button,mouseButton)
+  if TalentInspect_IsSettingEnabled and not TalentInspect_IsSettingEnabled("links") then return nil end
   if mouseButton~="LeftButton" then return nil end
   if not IsShiftKeyDown or not IsShiftKeyDown() then return nil end
   local box=activeEditBox()
@@ -215,6 +216,7 @@ function L:BuildNativeTalentLink(tab,index)
 end
 
 function TalentSyncLinkSystem_OnNativeTalentClick(button,mouseButton)
+  if TalentInspect_IsSettingEnabled and not TalentInspect_IsSettingEnabled("links") then return nil end
   if mouseButton~="LeftButton" then return nil end
   if not IsShiftKeyDown or not IsShiftKeyDown() then return nil end
   local box=activeEditBox()
