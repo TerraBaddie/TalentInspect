@@ -1,4 +1,4 @@
-# TalentInspect v1.3.0
+# TalentInspect v1.4.0
 
 TalentInspect adds inspectable VanillaPlus talent trees to World of Warcraft 1.12.1, with support for the Blizzard default UI and pfUI.
 
@@ -10,9 +10,8 @@ TalentInspect adds inspectable VanillaPlus talent trees to World of Warcraft 1.1
 
 ## Screenshots BUI / pfUI
 
-<img width="611" height="706" alt="image" src="https://github.com/user-attachments/assets/2c077a4f-1272-43d8-a56f-57826fb5f62b" />
-<img width="582" height="678" alt="image" src="https://github.com/user-attachments/assets/65a02130-c9f3-4a0e-87c3-4884fa2b5018" />
-
+<img width="500" height="474" alt="TalentInspect_GitHub_Preview_1_500px" src="https://github.com/user-attachments/assets/0566d6f1-252f-4437-964f-3785433cad06" />
+<img width="500" height="474" alt="TalentInspect_GitHub_Preview_2_500px" src="https://github.com/user-attachments/assets/d6360309-35f6-4bee-959f-3ff2a54619ce" />
 
 ## Features
 - Inspect VanillaPlus talent builds directly in-game.
@@ -36,14 +35,27 @@ TalentInspect adds inspectable VanillaPlus talent trees to World of Warcraft 1.1
 - Separate prerequisite rendering for each talent tree to prevent lines carrying between tabs.
 - Lightweight rendering designed for the WoW 1.12.1 client.
 
-## v1.3.0 Release Summary
+## v1.4.0 Cross-Faction & Learned Talent Persistence
 
-v1.3.0 is the Prerequisite Talent Lines and more stabilities release.
+- Added persistent learned talent data so information survives logout and login, preventing previously learned talents from returning as blank icon placeholders.
+- Added richer persistent class knowledge for all 9 Vanilla classes while keeping individual inspected-player records lightweight.
+- Added stronger learned-data fallback behavior, combining live discoveries with packaged VanillaPlus talent data when information is missing.
+- Further hardened no-sync inspection
+
+## v1.3.5 QoL & Stability
+
+- Added customizable Sync, Tooltips, Cache, and Links options.
+- Added `/ti reset` UI/BOX for settings and saved-data management.
+- Greatly reduced SavedVariables size with automatic database migration.
+- Improved cross-faction inspect safety when grouped players become hostile.
+- Additional Lua 5.0 compatibility and stability fixes.
+- Learned class data now reconstructs cached talent icons when live sync is unavailable.
+
 
 ## v1.3.0 Improvements / changes
 
 - Restored gold/yellow prerequisite talent lines with stronger cross-tree isolation and safer rendering.
-- Added self-learning prerequisite support using live VanillaPlus talent data, with packaged andser99 talent tree data retained as the offline fallback.
+- Added self-learning prerequisite support using live VanillaPlus talent data, with packaged data retained as the offline fallback.
 - Restored the proven 7-second Talents request spam guard to prevent duplicate sync requests.
 - Fixed Guild/Friends right-click Talents handling for Vanilla 1.12.1 UnitPopup menus.
 - Retained SAFEUIBASE1 UI improvements including icon borders, clipping, snap scrolling, tab persistence, and Blizzard/pfUI support.
@@ -66,22 +78,16 @@ v1.3.0 is the Prerequisite Talent Lines and more stabilities release.
 
 ## Commands
 
-- `/ti`
+- `/ti` / `/ti help`
 - `/ti refresh`
-- `/ti cache`
-- `/ti clearcache`
-- `/ti help`
+- `/ti sync on|off`
+- `/ti tooltips on|off`
+- `/ti cache on|off`
+- `/ti links on|off`
+- `/ti status`
+- `/ti players`
+- `/ti reset`
 
 ## Compatibility
 
 Designed for World of Warcraft 1.12.1 / VanillaPlus. Supports the Blizzard default UI and pfUI.
-
-## Release Baseline
-
-v1.3.0 was promoted from the tested development lines:
-
-`SAFEUIBASE1 -> PREREQLINES3 -> TREEISOLATE2 -> LIVEPREREQ2 -> UnitPopup hotfixes -> 7S SPAMGUARD`
-
-The clean pre-prerequisite rollback baseline remains:
-
-`TalentInspect_v1.1.0_SAFEUIBASE1_NOARROWS_ROWSNAP3_BUIICON2_TABSTAY1`
