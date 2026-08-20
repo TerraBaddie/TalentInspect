@@ -108,15 +108,113 @@ local function makePos(tier,col)
   return "r"..tier.."c"..col
 end
 
+-- DB4: learned CLASS data is deliberately rich and self-contained.
+-- There are only nine classes, so do not trade reliability for tiny savings
+-- here. Player builds remain compact in TalentInspect.lua; learned class
+-- definitions retain identity, icon, geometry, max rank, prereqs and learned
+-- descriptions across logout/login.
+local function staticTalent(classToken,treeIndex,index,name)
+  local tree=TalentInspectData_GetTree and TalentInspectData_GetTree(classToken,treeIndex)
+  if not tree or not tree.talents then return nil end
+  if name and name~="" then
+    for _,t in pairs(tree.talents) do
+      if t and (t.name==name or t.sourceName==name) then return t end
+    end
+  end
+  return index and tree.talents[index] or nil
+end
+
+local function staticTierCol(t)
+  if not t then return nil,nil end
+  local tier=t.tier
+  local col=t.col
+  if (not tier or not col) and t.pos then
+    local _,_,a,b=string.find(t.pos,"^r(%d+)c(%d+)$")
+    tier=tonumber(a) or tier
+    col=tonumber(b) or col
+  end
+  return tier,col
+end
+
+local function compactLearned(classData)
+  if not classData or not classData.class then return nil end
+  local out={v=4,class=classData.class,scannedAt=classData.scannedAt or 0,trees={}}
+  for p=1,3 do
+    local tree=classData.trees and classData.trees[p]
+    if tree then
+      local ot={name=tree.name,icon=tree.icon,talents={}}
+      for i,t in pairs(tree.talents or {}) do
+        if t then
+          ot.talents[i]={
+            n=t.name or t.sourceName,
+            x=t.index or i,
+            tr=t.tier,
+            c=t.col,
+            m=t.maxRank,
+            i=t.icon,
+            ps=t.prereqScanned,
+            pn=t.prereqName,
+            pr=t.preRank,
+            d=t.desc,
+            dr=t.descRank,
+            s=t.source or "learned"
+          }
+        end
+      end
+      out.trees[p]=ot
+    end
+  end
+  return out
+end
+
+local function expandLearned(saved)
+  if not saved or not saved.class then return saved end
+  -- DB1 rich records already are usable. DB2/DB3 compact records are repaired
+  -- from packaged metadata; DB4 is self-contained and preferred thereafter.
+  if saved.v~=2 and saved.v~=3 and saved.v~=4 then return saved end
+  local d={class=saved.class,scannedAt=saved.scannedAt or 0,trees={}}
+  for p=1,3 do
+    local stree=saved.trees and saved.trees[p]
+    if stree then
+      local tree={name=stree.name,icon=stree.icon,talents={},byName={},byPos={}}
+      for i,q in pairs(stree.talents or {}) do
+        local st=staticTalent(saved.class,p,q.x or i,q.n)
+        if not st and not q.n then st=staticTalent(saved.class,p,i,nil) end
+        local stTier,stCol=staticTierCol(st)
+        local name=q.n or (st and (st.name or st.sourceName))
+        local index=q.x or i
+        local tier=q.tr or stTier
+        local col=q.c or stCol
+        local maxRank=q.m or (st and st.maxRank) or 0
+        local icon=q.i or (st and st.icon)
+        if icon and icon~="" and not string.find(icon,"\\",1,true) then
+          icon="Interface\\Icons\\"..icon
+        end
+        local rec={learned=1,source=q.s or "learned",index=index,sourceName=name,name=name,
+          tier=tier,col=col,pos=makePos(tier,col),rank=0,maxRank=maxRank,icon=icon,
+          prereqScanned=q.ps,prereqName=q.pn,preRank=q.pr,desc=q.d,descRank=q.dr,
+          scannedAt=d.scannedAt}
+        tree.talents[i]=rec
+        if rec.name then tree.byName[rec.name]=rec end
+        if rec.pos then tree.byPos[rec.pos]=rec end
+      end
+      d.trees[p]=tree
+    end
+  end
+  return d
+end
+
 local function publishLearned(classToken,classData)
   TalentInspectData_Learned[classToken]=classData
   local db=ensureDB()
-  db[classToken]=classData
+  db[classToken]=compactLearned(classData)
+  TalentInspectDB.learnedSchema=4
 end
 
 function H:RestoreLearned()
   local db=ensureDB()
-  for classToken,classData in pairs(db) do
+  for classToken,savedData in pairs(db) do
+    local classData=expandLearned(savedData)
     if classData and classData.trees then
       for p=1,3 do
         local tree=classData.trees[p]
@@ -168,7 +266,9 @@ function H:RestoreLearned()
       end
     end
     TalentInspectData_Learned[classToken]=classData
+    db[classToken]=compactLearned(classData)
   end
+  TalentInspectDB.learnedSchema=4
 end
 
 function H:ScanCurrentClass(reason,includeDescriptions)
@@ -500,7 +600,7 @@ function H:FinalizePeerClass(classToken,expected)
   if got~=expected then H.peerStaging[classToken]=nil; return nil end
   d.fingerprint=got; d.receivedAt=time and time() or 0
   local db=ensureDB()
-  db[classToken]=d
+  db[classToken]=compactLearned(d)
   TalentInspectData_Learned[classToken]=d
   H.peerStaging[classToken]=nil
   return 1
