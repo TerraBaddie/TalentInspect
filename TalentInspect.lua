@@ -1,12 +1,47 @@
--- TalentInspect v1.3.0 - WoW 1.12.1 / VanillaPlus
+-- TalentInspect v1.4.0 - WoW 1.12.1 / VanillaPlus
 -- Request-driven talent sync with Blizzard-style one-tree-per-page UI.
 
 TalentInspectDB = TalentInspectDB or {}
 TalentInspectDB.cache = TalentInspectDB.cache or {}
 TalentInspectDB.cacheSchema = TalentInspectDB.cacheSchema or 1
+TalentInspectDB.learnedSchema = TalentInspectDB.learnedSchema or 1
+TalentInspectDB.schema = TalentInspectDB.schema or TalentInspectDB.cacheSchema or 1
+TalentInspectDB.migratedFrom = TalentInspectDB.migratedFrom or nil
+
+-- SETTINGS1: persist overrides only; missing values inherit these defaults.
+local TI_DEFAULTS = {
+  sync = true,
+  tooltips = true,
+  cache = true,
+  links = true,
+}
+TalentInspectDB.settings = TalentInspectDB.settings or {}
+-- SETTINGS2: prerequisite lines are a core feature, not a user preference.
+-- Remove stale SETTINGS1 overrides so an old /ti lines off cannot survive upgrade.
+TalentInspectDB.settings.arrows = nil
+TalentInspectDB.settings.lines = nil
+
+local function settingEnabled(key)
+  local v=TalentInspectDB.settings and TalentInspectDB.settings[key]
+  if v==nil then return TI_DEFAULTS[key]~=false end
+  return v and true or false
+end
+
+local function setSetting(key,value)
+  TalentInspectDB.settings=TalentInspectDB.settings or {}
+  if value==TI_DEFAULTS[key] then TalentInspectDB.settings[key]=nil
+  else TalentInspectDB.settings[key]=value and true or false end
+end
+
+function TalentInspect_IsSettingEnabled(key)
+  return settingEnabled(key)
+end
+
+-- DB3: player cache stays compact; learned data is a delta overlay on packaged TalentData.lua.
+local runtimeCache = {}
 
 local TI = {}
-TI.VERSION = "1.3.0"
+TI.VERSION = "1.3.5-DB4"
 TI.PREFIX = "VPTI1"
 TI.selectedTab = 1
 TI.currentName = nil
@@ -107,14 +142,11 @@ local function buildZeroTalentData(name,classToken,level)
     classToken=TalentInspectData_NormalizeClass(classToken)
   end
 
-  -- TREEFIX1:
-  -- Empty/no-sync trees must ALWAYS get their identity from the packaged class
-  -- definition. Learned data is an overlay, never a replacement tree.
-  --
-  -- The old code preferred learnedClass.trees[p] wholesale. Older/incomplete
-  -- learned snapshots may contain talents/prereqs but no tree.name, causing
-  -- visible "Tree 1 / Tree 2 / Tree 3" labels after legacy clearcache/runtime
-  -- disruption.
+  -- LEARNEDFALLBACK1:
+  -- Packaged data remains the baseline, but once this client has learned an
+  -- exact live class roster, that learned identity/index/geometry becomes the
+  -- authority for reconstructing cached builds while the player is offline.
+  -- This prevents stale packaged slots from creating blank/misplaced icons.
   local names=VPLUS_TREE_NAMES[classToken or ""]
   local bgNames=VPLUS_TREE_BACKGROUNDS[classToken or ""]
   local d={name=name,class=classToken,level=level or 0,tabs={}}
@@ -126,77 +158,79 @@ local function buildZeroTalentData(name,classToken,level)
     local staticTree=TalentInspectData_GetTree and TalentInspectData_GetTree(classToken,p)
     local learnedTree=learnedClass and learnedClass.trees and learnedClass.trees[p]
 
-    if staticTree then
+    if staticTree or learnedTree then
       local tab={
-        name=(names and names[p]) or staticTree.name or ("Tree "..p),
-        icon=staticTree.icon and ("Interface\\Icons\\"..staticTree.icon) or "",
+        name=(names and names[p]) or (staticTree and staticTree.name) or
+             (learnedTree and learnedTree.name) or ("Tree "..p),
+        icon=(staticTree and staticTree.icon and ("Interface\\Icons\\"..staticTree.icon)) or "",
         points=0,
-        fileName=(bgNames and bgNames[p]) or staticTree.background or "",
+        fileName=(bgNames and bgNames[p]) or (staticTree and staticTree.background) or "",
         talents={}
       }
 
-      -- Static packaged tree owns the complete talent roster/geometry.
-      for idx,st in pairs(staticTree.talents or {}) do
-        local tier=st.tier
-        local col=st.col
-        if (not tier or not col) and st.pos then
-          local letter=string.sub(st.pos,1,1)
-          tier=string.byte(letter)-96
-          col=tonumber(string.sub(st.pos,2)) or 1
+      local roster=(learnedTree and learnedTree.talents and next(learnedTree.talents) and learnedTree.talents) or
+                   (staticTree and staticTree.talents) or {}
+
+      for idx,src in pairs(roster) do
+        local st=nil
+        if TalentInspectData_FindTalent then
+          st=TalentInspectData_FindTalent(classToken,p,src.name or src.sourceName,src.pos,src.index or idx)
+        end
+        st=st or src
+
+        local tier=src.tier or st.tier
+        local col=src.col or st.col
+        if (not tier or not col) and (src.pos or st.pos) then
+          local pos=src.pos or st.pos
+          local _,_,a,b=string.find(pos,"^r(%d+)c(%d+)$")
+          tier=tonumber(a) or tier
+          col=tonumber(b) or col
         end
 
-        local icon=st.icon or ""
+        local icon=src.icon or st.icon or ""
         if icon~="" and not string.find(icon,"\\",1,true) then
           icon="Interface\\Icons\\"..icon
         end
 
-        local liveOverlay=nil
-        if learnedTree and learnedTree.byName then
-          liveOverlay=learnedTree.byName[st.name] or
-                      (st.sourceName and learnedTree.byName[st.sourceName])
-        end
-
-        local preTier=nil
-        local preCol=nil
-        local preRank=nil
         local prereqName=nil
         local prereqScanned=nil
-
-        -- LIVEPREREQ2: learned exact-name prerequisite authority overlays only
-        -- this exact talent identity. Empty string is authoritative NONE.
-        if liveOverlay and liveOverlay.prereqScanned==1 then
-          preTier=liveOverlay.preTier
-          preCol=liveOverlay.preCol
-          preRank=liveOverlay.preRank
-          prereqName=liveOverlay.prereqName or ""
+        local preRank=nil
+        if src.prereqScanned==1 then
+          prereqName=src.prereqName or ""
           prereqScanned=1
+          preRank=src.preRank
+        elseif st.prereqScanned==1 then
+          prereqName=st.prereqName or ""
+          prereqScanned=1
+          preRank=st.preRank
+        elseif st.prereq then
+          prereqName=st.prereq
         end
 
         tab.talents[idx]={
-          index=idx,
-          name=st.name or st.sourceName or ("Talent "..idx),
+          index=src.index or idx,
+          name=src.name or src.sourceName or st.name or st.sourceName or ("Talent "..idx),
           icon=icon,
           tier=tier or 1,
           col=col or 1,
           rank=0,
-          maxRank=(liveOverlay and liveOverlay.maxRank) or st.maxRank or 1,
-          preTier=preTier or 0,
-          preCol=preCol or 0,
+          maxRank=src.maxRank or st.maxRank or 1,
+          preTier=0,
+          preCol=0,
           preRank=preRank,
           prereqName=prereqName,
-          prereqScanned=prereqScanned
+          prereqScanned=prereqScanned,
+          description=src.desc
         }
       end
 
-      -- Static prerequisite fallback applies only when a live learned scan has
-      -- not authoritatively supplied/removed the prerequisite.
-      for idx,st in pairs(staticTree.talents or {}) do
-        if st.prereq and tab.talents[idx] and tab.talents[idx].prereqScanned~=1 then
+      -- Resolve prerequisite names against the exact reconstructed roster.
+      for _,t in pairs(tab.talents) do
+        if t.prereqName and t.prereqName~="" then
           for _,pre in pairs(tab.talents) do
-            if pre.name==st.prereq then
-              tab.talents[idx].preTier=pre.tier or 0
-              tab.talents[idx].preCol=pre.col or 0
-              tab.talents[idx].prereqName=st.prereq
+            if pre.name==t.prereqName then
+              t.preTier=pre.tier or 0
+              t.preCol=pre.col or 0
               break
             end
           end
@@ -206,8 +240,83 @@ local function buildZeroTalentData(name,classToken,level)
       d.tabs[p]=tab
     end
   end
-
   return d
+end
+
+-- DB4 compact inspected-player cache -----------------------------------------
+local function compactCachedBuild(d)
+  if not d or not d.name or not d.class or not d.tabs then return nil end
+  local c={v=4,name=d.name,class=d.class,level=d.level or 0,stamp=d.stamp or (time and time() or 0),tabs={}}
+  for p=1,3 do
+    local tab=d.tabs[p]
+    if tab then
+      local ct={points=tab.points or 0,ranks={},desc={}}
+      for i,t in pairs(tab.talents or {}) do
+        local r=tonumber(t.rank) or 0
+        if r~=0 then ct.ranks[i]=r end
+        if t.description and t.description~="" then ct.desc[i]=t.description end
+      end
+      if not next(ct.desc) then ct.desc=nil end
+      c.tabs[p]=ct
+    end
+  end
+  return c
+end
+
+local function expandCachedBuild(c)
+  if not c then return nil end
+  if c.tabs and c.v~=2 and c.v~=4 then return c end -- legacy rich cache
+  if (c.v~=2 and c.v~=4) or not c.name or not c.class then return nil end
+  local d=buildZeroTalentData(c.name,c.class,c.level or 0)
+  if not d then return nil end
+  d.stamp=c.stamp or 0
+  for p=1,3 do
+    local ct=c.tabs and c.tabs[p]
+    local tab=d.tabs and d.tabs[p]
+    if ct and tab then
+      tab.points=ct.points or 0
+      for i,r in pairs(ct.ranks or {}) do
+        if tab.talents[i] then tab.talents[i].rank=tonumber(r) or 0 end
+      end
+      for i,text in pairs(ct.desc or {}) do
+        if tab.talents[i] then tab.talents[i].description=text end
+      end
+    end
+  end
+  return d
+end
+
+local function getCachedBuild(name)
+  if not name then return nil end
+  if runtimeCache[name] then return runtimeCache[name] end
+  local saved=TalentInspectDB.cache and TalentInspectDB.cache[name]
+  local d=expandCachedBuild(saved)
+  if d then runtimeCache[name]=d end
+  return d
+end
+
+local function removeCachedBuild(name)
+  runtimeCache[name]=nil
+  if TalentInspectDB.cache then TalentInspectDB.cache[name]=nil end
+end
+
+local function migrateCacheSchema4()
+  TalentInspectDB.cache=TalentInspectDB.cache or {}
+  if TalentInspectDB.cacheSchema==4 then TalentInspectDB.schema=4 return end
+  local fresh={}
+  for name,entry in pairs(TalentInspectDB.cache) do
+    local rich=expandCachedBuild(entry)
+    if rich and rich.name then
+      runtimeCache[name]=rich
+      local compact=compactCachedBuild(rich)
+      if compact then fresh[name]=compact end
+    end
+  end
+  TalentInspectDB.cache=fresh
+  local old=TalentInspectDB.cacheSchema or 1
+  TalentInspectDB.cacheSchema=4
+  TalentInspectDB.schema=4
+  if old~=4 then TalentInspectDB.migratedFrom=old end
 end
 
 -- One geometry source of truth. Hawaiisa's calculator is a 4-column x 7-row grid.
@@ -284,6 +393,7 @@ TI.outboxElapsed = 0
 local syncPump=CreateFrame("Frame")
 
 local function sendNow(msg, channel)
+  if not settingEnabled("sync") then return end
   if SendAddonMessage and msg and channel then SendAddonMessage(TI.PREFIX,msg,channel) end
 end
 local function outboxCount()
@@ -477,10 +587,14 @@ end
 local function cacheData(d)
   if not d or not d.name then return end
   d.stamp=time and time() or 0
-  TalentInspectDB.cache[d.name]=d
+  runtimeCache[d.name]=d
+  if not settingEnabled("cache") then return end
+  TalentInspectDB.cacheSchema=4
+  TalentInspectDB.schema=4
+  TalentInspectDB.cache[d.name]=compactCachedBuild(d)
   local count=0
   for _ in pairs(TalentInspectDB.cache) do count=count+1 end
-  while count>40 do
+  while count>200 do
     local oldestName=nil; local oldestStamp=nil
     for name,entry in pairs(TalentInspectDB.cache) do
       if name~=d.name then
@@ -489,7 +603,7 @@ local function cacheData(d)
       end
     end
     if not oldestName then break end
-    TalentInspectDB.cache[oldestName]=nil
+    removeCachedBuild(oldestName)
     count=count-1
   end
 end
@@ -509,7 +623,9 @@ local function clearTalentCache()
   -- A fresh table also means the old cache becomes collectible naturally
   -- after no live UI references remain.
   TalentInspectDB.cache = {}
-  TalentInspectDB.cacheSchema = 1
+  runtimeCache = {}
+  TalentInspectDB.cacheSchema = 4
+  TalentInspectDB.schema = 4
 end
 
 -- UI -------------------------------------------------------------------------
@@ -1115,7 +1231,7 @@ local function makeTalentButton(i)
       GameTooltip:Show()
       return
     end
-    if renderStaticTalentTooltip then renderStaticTalentTooltip(this) end
+    if settingEnabled("tooltips") and renderStaticTalentTooltip then renderStaticTalentTooltip(this) end
   end)
   b:SetScript("OnLeave", function()
     if TI.hoveredTalentButton==this then TI.hoveredTalentButton=nil end
@@ -1948,12 +2064,12 @@ local function request(name)
     expectedClass=TalentInspectData_NormalizeClass(expectedClass)
   end
   TI.syncExpectedClass=expectedClass
-  local cached=TalentInspectDB.cache[name]
+  local cached=getCachedBuild(name)
   if cached and not validCachedBuild(cached) then
     -- TREEFIX1: quarantine a malformed legacy cache entry instead of rendering
     -- generic Tree 1/2/3 state. This repairs players previously affected by
     -- the destructive old /ti clearcache behavior on their next inspection.
-    TalentInspectDB.cache[name]=nil
+    removeCachedBuild(name)
     cached=nil
   end
   if cached and cached.name==name and TI.embeddedPrefix=="InspectFrame" then
@@ -2165,9 +2281,10 @@ end
 
 local function cacheDescription(name,page,index,text)
   descRequested[tostring(name)..":"..tostring(page)..":"..tostring(index)]=nil
-  local d=TalentInspectDB and TalentInspectDB.cache and TalentInspectDB.cache[name]
+  local d=getCachedBuild(name)
   if not d or not d.tabs or not d.tabs[page] or not d.tabs[page].talents[index] then return end
   d.tabs[page].talents[index].description=text
+  TalentInspectDB.cache[name]=compactCachedBuild(d)
   if TI.currentData==d then TI.currentData.tabs[page].talents[index].description=text end
 
   local hb=TI.hoveredTalentButton
@@ -2310,7 +2427,7 @@ local function showEmbeddedTalents(host, prefix)
   if f.scrollBar then f.scrollBar:Show() end
 
   -- Show only data that is explicitly owned by THIS player.
-  local cached=TalentInspectDB.cache and TalentInspectDB.cache[name]
+  local cached=getCachedBuild(name)
   if cached and cached.name==name then
     if hs then
       hs.name=name
@@ -2503,15 +2620,17 @@ local function installInspectFrameGuard()
     -- Stock Blizzard_InspectUI can attempt portrait work during a target swap
     -- after the old inspected unit has become invalid. When TalentInspect owns
     -- the InspectFrame, swallow only that invalid PLAYER_TARGET_CHANGED event.
-    if event=="PLAYER_TARGET_CHANGED" and TI.embeddedPrefix=="InspectFrame" and f:IsShown() then
+    if event=="PLAYER_TARGET_CHANGED" and host and host:IsShown() then
       local safe=nil
       if targetCanBeInspectedSafely then safe=targetCanBeInspectedSafely() end
       if not safe then
+        -- HOSTILESAFE1: do not let stock Blizzard_InspectUI process a target
+        -- transition to a hostile/invalid player.  Its PaperDoll/portrait code
+        -- calls SetUnit/SetPortraitTexture with an unusable inspect unit on this
+        -- client.  Cross-faction party/raid members pass the helper above.
         if closeInvalidInspectTarget then
           closeInvalidInspectTarget()
         else
-          -- Ultra-early fallback: never pass an invalid target transition into
-          -- stock Blizzard_InspectUI portrait code.
           if host then host:Hide() end
         end
         return
@@ -2563,9 +2682,32 @@ end
 local pendingNativeOpen
 local pendingNativeElapsed=0
 
+-- HOSTILESAFE1: Blizzard_InspectUI cannot safely InspectUnit() a genuinely
+-- hostile player on this client.  VanillaPlus can have cross-faction party/raid
+-- members, so faction/race is NOT authoritative here: a roster member is always
+-- allowed, even if UnitIsFriend/UnitCanCooperate reports an odd faction result.
+local function targetIsFriendlyOrGroupedForInspect()
+  if not UnitExists("target") or not UnitIsPlayer("target") then return nil end
+
+  local targetName=UnitName("target")
+  if not targetName or targetName=="" then return nil end
+
+  -- Explicit group membership wins for VanillaPlus cross-faction grouping.
+  if isNameInParty(targetName) or isNameInRaid(targetName) then return 1 end
+
+  -- Outside a group, require Blizzard's relationship APIs to consider the
+  -- target cooperative/friendly.  Guard both APIs because private-server
+  -- clients can expose only one or implement them slightly differently.
+  if UnitCanCooperate and UnitCanCooperate("player","target") then return 1 end
+  if UnitIsFriend and UnitIsFriend("player","target") then return 1 end
+
+  return nil
+end
+
 targetCanBeInspectedSafely = function()
   if not UnitExists("target") or not UnitIsPlayer("target") then return nil end
   if UnitName("target")==UnitName("player") then return nil end
+  if not targetIsFriendlyOrGroupedForInspect() then return nil end
 
   -- 1.12 InspectUnit itself is normally gated by CheckInteractDistance(...,1).
   if CheckInteractDistance and not CheckInteractDistance("target",1) then
@@ -2772,6 +2914,7 @@ eventFrame:SetScript("OnEvent", function()
   if event=="PLAYER_LOGIN" then
     math.randomseed(time())
     if type(TalentInspectDB.cache)~="table" then TalentInspectDB.cache={} end
+    migrateCacheSchema4()
     refreshGuildRosterNames()
     installNativeTabs()
     return
@@ -2814,6 +2957,7 @@ eventFrame:SetScript("OnEvent", function()
   end
 
   if event~="CHAT_MSG_ADDON" or arg1~=TI.PREFIX then return end
+  if not settingEnabled("sync") then return end
   local msg, channel, sender=arg2,arg3,arg4
   local a=split(msg,"^")
   local cmd=a[1]
@@ -3011,7 +3155,7 @@ eventFrame:SetScript("OnEvent", function()
       end
     end
 
-    local old=TalentInspectDB.cache[d.name]
+    local old=getCachedBuild(d.name)
     if old and old.tabs then
       for p=1,3 do
         if d.tabs[p] and old.tabs[p] and old.tabs[p].talents then
@@ -3054,58 +3198,270 @@ eventFrame:SetScript("OnEvent", function()
 end)
 
 -- Slash commands -------------------------------------------------------------
+local function tiOnOff(v) return v and "|cff33ff66ON|r" or "|cffff5555OFF|r" end
+
+local function clearLearnedTalentData()
+  TalentInspectDB.learned={}
+  TalentInspectDB.learnedSchema=4
+  TalentInspectData_Learned={}
+  if TalentInspectHelper and TalentInspectHelper.RestoreLearned then
+    TalentInspectHelper:RestoreLearned()
+  end
+end
+
+local function printSettingsStatus()
+  DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect v"..TI.VERSION.." settings|r")
+  DEFAULT_CHAT_FRAME:AddMessage(" Sync: "..tiOnOff(settingEnabled("sync")).."  Tooltips: "..tiOnOff(settingEnabled("tooltips")))
+  DEFAULT_CHAT_FRAME:AddMessage(" Cache: "..tiOnOff(settingEnabled("cache")).."  Links: "..tiOnOff(settingEnabled("links")))
+end
+
+local function refreshCurrentTalentView()
+  if TI.currentData and f:IsShown() then
+    local status=nil
+    if f.status and f.status.GetText then status=f.status:GetText() end
+    showData(TI.currentData,status)
+  end
+end
+
+-- RESETUI1: one small centered reset/data-management panel.  No drag state,
+-- no dependence on Blizzard popup templates, and destructive actions always
+-- require an explicit second click.
+local resetFrame=nil
+local resetConfirmMode=nil
+
+local function makeResetButton(parent,text,w,h)
+  local b=CreateFrame("Button",nil,parent)
+  b:SetWidth(w or 74)
+  b:SetHeight(h or 22)
+  b:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=10,insets={left=2,right=2,top=2,bottom=2}})
+  b:SetBackdropColor(0.10,0.10,0.10,0.96)
+  b:SetBackdropBorderColor(0.55,0.55,0.55,1)
+  local fs=b:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+  fs:SetPoint("CENTER",b,"CENTER",0,0)
+  fs:SetText(text)
+  b.text=fs
+  b:SetScript("OnEnter",function() this:SetBackdropBorderColor(1,0.82,0,1) end)
+  b:SetScript("OnLeave",function() this:SetBackdropBorderColor(0.55,0.55,0.55,1) end)
+  return b
+end
+
+local function resetFrameShowMain()
+  if not resetFrame then return end
+  resetConfirmMode=nil
+  resetFrame.confirmText:Hide()
+  resetFrame.deleteButton:Hide()
+  resetFrame.cancelButton:Hide()
+  resetFrame.helpText:Show()
+  resetFrame.defaultsButton:Show()
+  resetFrame.playerButton:Show()
+  resetFrame.learnedButton:Show()
+  resetFrame.allButton:Show()
+end
+
+local function resetFrameAsk(mode)
+  if not resetFrame then return end
+  resetConfirmMode=mode
+  resetFrame.helpText:Hide()
+  resetFrame.defaultsButton:Hide()
+  resetFrame.playerButton:Hide()
+  resetFrame.learnedButton:Hide()
+  resetFrame.allButton:Hide()
+  local label=""
+  if mode=="player" then label="Player"
+  elseif mode=="learned" then label="Learned"
+  else label="All" end
+  resetFrame.confirmText:SetText("Are you sure you want to delete "..label.." data?")
+  resetFrame.confirmText:Show()
+  resetFrame.deleteButton:Show()
+  resetFrame.cancelButton:Show()
+end
+
+local function performResetDelete()
+  if resetConfirmMode=="player" then
+    clearTalentCache()
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r cached player talent builds cleared.")
+  elseif resetConfirmMode=="learned" then
+    clearLearnedTalentData()
+    refreshCurrentTalentView()
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r learned talent/prerequisite data cleared. Packaged data remains available.")
+  elseif resetConfirmMode=="all" then
+    clearTalentCache()
+    clearLearnedTalentData()
+    refreshCurrentTalentView()
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r all saved player and learned talent data cleared. Settings were kept.")
+  end
+  resetFrameShowMain()
+end
+
+local function ensureResetFrame()
+  if resetFrame then return resetFrame end
+
+  local r=CreateFrame("Frame","TalentInspectResetFrame",UIParent)
+  r:SetWidth(310)
+  r:SetHeight(154)
+  r:SetPoint("CENTER",UIParent,"CENTER",0,30)
+  r:SetFrameStrata("DIALOG")
+  r:SetToplevel(true)
+  r:EnableMouse(true)
+  r:SetMovable(false)
+  r:SetClampedToScreen(true)
+  r:SetBackdrop({bgFile="Interface\\DialogFrame\\UI-DialogBox-Background",edgeFile="Interface\\DialogFrame\\UI-DialogBox-Border",tile=true,tileSize=32,edgeSize=24,insets={left=7,right=7,top=7,bottom=7}})
+  r:Hide()
+
+  local title=r:CreateFontString(nil,"OVERLAY","GameFontNormal")
+  title:SetPoint("TOP",r,"TOP",0,-16)
+  title:SetText("TalentInspect Reset")
+  r.title=title
+
+  local close=CreateFrame("Button",nil,r)
+  close:SetWidth(18)
+  close:SetHeight(18)
+  close:SetPoint("TOPRIGHT",r,"TOPRIGHT",-9,-9)
+  local cfs=close:CreateFontString(nil,"OVERLAY","GameFontNormal")
+  cfs:SetPoint("CENTER",close,"CENTER",0,0)
+  cfs:SetText("|cffff5555X|r")
+  close:SetScript("OnClick",function() resetConfirmMode=nil; r:Hide() end)
+  r.closeButton=close
+
+  local help=r:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
+  help:SetPoint("TOP",title,"BOTTOM",0,-10)
+  help:SetText("Reset settings or clear saved data")
+  r.helpText=help
+
+  local defaults=makeResetButton(r,"Defaults",82,22)
+  defaults:SetPoint("TOP",help,"BOTTOM",0,-9)
+  defaults:SetScript("OnClick",function()
+    TalentInspectDB.settings={}
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r settings restored to defaults (all optional features ON).")
+  end)
+  r.defaultsButton=defaults
+
+  local player=makeResetButton(r,"Player",74,22)
+  player:SetPoint("BOTTOMLEFT",r,"BOTTOMLEFT",30,18)
+  player:SetScript("OnClick",function() resetFrameAsk("player") end)
+  r.playerButton=player
+
+  local learned=makeResetButton(r,"Learned",74,22)
+  learned:SetPoint("LEFT",player,"RIGHT",14,0)
+  learned:SetScript("OnClick",function() resetFrameAsk("learned") end)
+  r.learnedButton=learned
+
+  local all=makeResetButton(r,"All",74,22)
+  all:SetPoint("LEFT",learned,"RIGHT",14,0)
+  all:SetScript("OnClick",function() resetFrameAsk("all") end)
+  r.allButton=all
+
+  local confirm=r:CreateFontString(nil,"OVERLAY","GameFontHighlight")
+  confirm:SetWidth(255)
+  confirm:SetPoint("CENTER",r,"CENTER",0,13)
+  confirm:SetJustifyH("CENTER")
+  confirm:SetText("")
+  confirm:Hide()
+  r.confirmText=confirm
+
+  local del=makeResetButton(r,"Delete",82,24)
+  del:SetPoint("BOTTOM",r,"BOTTOM",-48,21)
+  del:SetScript("OnClick",performResetDelete)
+  del:Hide()
+  r.deleteButton=del
+
+  local cancel=makeResetButton(r,"Cancel",82,24)
+  cancel:SetPoint("LEFT",del,"RIGHT",14,0)
+  cancel:SetScript("OnClick",resetFrameShowMain)
+  cancel:Hide()
+  r.cancelButton=cancel
+
+  r:SetScript("OnShow",resetFrameShowMain)
+  resetFrame=r
+  return r
+end
+
+local function showResetFrame()
+  local r=ensureResetFrame()
+  r:ClearAllPoints()
+  r:SetPoint("CENTER",UIParent,"CENTER",0,30)
+  resetFrameShowMain()
+  r:Show()
+end
+
+local function handleToggle(key,label,arg)
+  if arg~="on" and arg~="off" then
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r /ti "..label.." on|off  (currently "..(settingEnabled(key) and "ON" or "OFF")..")")
+    return
+  end
+  local enabled=(arg=="on")
+  setSetting(key,enabled)
+  DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r "..label.." "..(enabled and "enabled." or "disabled."))
+end
+
 SLASH_TALENTINSPECT1="/ti"
 SLASH_TALENTINSPECT2="/talentinspect"
 SlashCmdList["TALENTINSPECT"]=function(msg)
   msg=string.lower(msg or "")
+  msg=string.gsub(msg,"^%s+","")
+  msg=string.gsub(msg,"%s+$","")
+  local _,_,cmd,arg=string.find(msg,"^(%S+)%s*(.-)$")
+  cmd=cmd or ""
 
-  -- CMDLEAN1 public command surface:
-  -- No command is allowed to tear down active UI/runtime state.
-  if msg=="" then
-    -- SLASHSAFE1: /ti is now just another safe deferred-open entry point.
-    -- No InspectUnit/ShowUIPanel/render/reset work runs inside the slash handler.
-    inspectTarget()
-    return
-  end
+  if cmd=="" then inspectTarget(); return end
 
-  if msg=="refresh" then
+  if cmd=="refresh" then
     if not UnitExists("target") or not UnitIsPlayer("target") then
       DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r refresh skipped: target a nearby inspectable player.")
       return
     end
-
     local targetName=UnitName("target")
     if not targetName or targetName=="" then
       DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r refresh skipped: no valid target.")
       return
     end
-
-    if TI.QueueSafeOpen then
-      TI.QueueSafeOpen(targetName,1)
-    end
+    if TI.QueueSafeOpen then TI.QueueSafeOpen(targetName,1) end
     return
   end
 
-  if msg=="cache" then
+  if cmd=="players" then
     local n=0
     for _ in pairs(TalentInspectDB.cache or {}) do n=n+1 end
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r "..n.." cached player talent build(s).")
     return
   end
 
-  if msg=="clearcache" then
-    clearTalentCache()
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r saved inspected-player cache cleared safely. The currently open talent tree was left untouched.")
+  if cmd=="sync" then handleToggle("sync","sync",arg); return end
+  if cmd=="tooltips" then handleToggle("tooltips","tooltips",arg); return end
+  if cmd=="cache" then handleToggle("cache","cache",arg); return end
+  if cmd=="links" then handleToggle("links","links",arg); return end
+
+  if cmd=="status" then printSettingsStatus(); return end
+
+  if cmd=="dbinfo" then
+    local classes=0
+    for _ in pairs(TalentInspectDB.learned or {}) do classes=classes+1 end
+    local players=0
+    for _ in pairs(TalentInspectDB.cache or {}) do players=players+1 end
+    local from=TalentInspectDB.migratedFrom and (" • migrated DB"..tostring(TalentInspectDB.migratedFrom)) or ""
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r DB4"..from.." • learned classes "..classes.."/9 • cached players "..players.."/200")
     return
   end
 
-  if msg=="help" then
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect|r  /ti  /ti refresh  /ti cache  /ti clearcache  /ti help")
+
+  if cmd=="reset" then showResetFrame(); return end
+
+  -- Retired data-clear/default commands are kept as safe compatibility aliases:
+  -- they now open the single reset panel instead of deleting immediately.
+  if cmd=="defaultsettings" or cmd=="clearplayers" or cmd=="clearlearnedtalents" or cmd=="clearalldata" or cmd=="clearcache" then
+    showResetFrame()
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r data/settings reset controls moved to |cffffffff/ti reset|r.")
     return
   end
 
-  -- Unknown/retired commands must NEVER fall through into opening or rebuilding
-  -- the Inspect UI. That old behavior made typos capable of changing runtime state.
+  if cmd=="help" then
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect v"..TI.VERSION.."|r")
+    DEFAULT_CHAT_FRAME:AddMessage(" /ti  /ti refresh  /ti status  /ti dbinfo  /ti players  /ti reset")
+    DEFAULT_CHAT_FRAME:AddMessage(" /ti sync on|off  /ti tooltips on|off")
+    DEFAULT_CHAT_FRAME:AddMessage(" /ti cache on|off  /ti links on|off")
+    return
+  end
+
   DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99TalentInspect:|r unknown or retired command. Use /ti help.")
 end
 
