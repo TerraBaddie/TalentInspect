@@ -35,14 +35,14 @@ TalentInspect adds inspectable VanillaPlus talent trees to World of Warcraft 1.1
 - Separate prerequisite rendering for each talent tree to prevent lines carrying between tabs.
 - Lightweight rendering designed for the WoW 1.12.1 client.
 
-## v1.4.0 More Cross-Faction Improvements & Learned Talent Logout/Login Persistence
+## v1.4.0 Improvements / changes
 
 - Added persistent learned talent data so information survives logout and login, preventing previously learned talents from returning as blank icon placeholders.
 - Added richer persistent class knowledge for all 9 Vanilla classes while keeping individual inspected-player records lightweight.
 - Added stronger learned-data fallback behavior, combining live discoveries with packaged VanillaPlus talent data when information is missing.
 - Further hardened no-sync inspection
 
-## v1.3.5 QoL & Stability
+## v1.3.5 Improvements / changes
 
 - Added customizable Sync, Tooltips, Cache, and Links options.
 - Added `/ti reset` UI/BOX for settings and saved-data management.
